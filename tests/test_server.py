@@ -17,11 +17,18 @@ class ServerTests(unittest.TestCase):
             resp_host="127.0.0.1",
             resp_port=0,
             max_entries=100,
+            max_memory_bytes=1_000_000,
+            max_entry_bytes=10_000,
             max_body_bytes=10_000,
             default_ttl_seconds=60,
             default_stale_seconds=60,
             lease_seconds=10,
+            shutdown_grace_seconds=1,
             api_key="secret",
+            tls_cert_file=None,
+            tls_key_file=None,
+            users_file=None,
+            log_format="text",
         )
         cls.server = MegaCacheServer(
             ("127.0.0.1", 0), config, CacheEngine(max_entries=100)
@@ -98,6 +105,20 @@ class ServerTests(unittest.TestCase):
         status, payload = self.request("GET", "/v1/cache/")
         self.assertEqual(400, status)
         self.assertEqual("invalid_request", payload["error"])
+
+    def test_get_with_body_is_rejected_and_connection_closed(self):
+        connection = HTTPConnection("127.0.0.1", self.port, timeout=2)
+        connection.request(
+            "GET",
+            "/healthz",
+            body="unexpected",
+            headers={"Content-Type": "text/plain"},
+        )
+        response = connection.getresponse()
+        response.read()
+        self.assertEqual(400, response.status)
+        self.assertEqual("close", response.getheader("Connection"))
+        connection.close()
 
 
 if __name__ == "__main__":

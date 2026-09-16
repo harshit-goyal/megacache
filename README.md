@@ -24,9 +24,12 @@ related keys stale. MegaCache makes the safe path explicit:
 - **Singleflight loading** coalesces concurrent in-process misses.
 - **Tag invalidation** expires related records without key scans.
 - **Bounded LRU storage** prevents unbounded process growth.
+- **Byte-aware admission and eviction** enforce total and per-entry limits.
 - **RESP2 compatibility** supports common Redis clients and `redis-cli`.
-- **Authentication**, request limits, health endpoints, and Prometheus metrics
-  provide a secure operational baseline.
+- **TLS and scoped users** protect HTTP and RESP traffic and restrict commands
+  and key prefixes.
+- **Structured logs and latency histograms** provide a production observability
+  baseline.
 - **Zero runtime dependencies** keeps deployment and auditing simple.
 
 ## Quick start
@@ -115,15 +118,29 @@ This prevents a cache stampede without trusting a client-side distributed lock.
 | `MEGACACHE_CLI_HOST` | `127.0.0.1` | Native CLI target host |
 | `MEGACACHE_CLI_PORT` | `6380` | Native CLI target port |
 | `MEGACACHE_MAX_ENTRIES` | `10000` | Maximum entries before LRU eviction |
+| `MEGACACHE_MAX_MEMORY_BYTES` | `67108864` | Estimated total cache memory limit |
+| `MEGACACHE_MAX_ENTRY_BYTES` | `1048576` | Maximum estimated size of one entry |
 | `MEGACACHE_MAX_BODY_BYTES` | `1048576` | Maximum JSON request size |
 | `MEGACACHE_DEFAULT_TTL_SECONDS` | `300` | Default fresh duration |
 | `MEGACACHE_DEFAULT_STALE_SECONDS` | `900` | Default stale duration |
 | `MEGACACHE_LEASE_SECONDS` | `30` | Refresh lease duration |
-| `MEGACACHE_API_KEY` | unset | Bearer token for `/v1/*` routes |
+| `MEGACACHE_SHUTDOWN_GRACE_SECONDS` | `10` | Maximum handler drain period |
+| `MEGACACHE_API_KEY` | unset | Legacy HTTP/RESP administrator secret |
+| `MEGACACHE_USERS_FILE` | unset | Named users, permissions and key prefixes |
+| `MEGACACHE_TLS_CERT_FILE` | unset | PEM certificate for HTTP and RESP TLS |
+| `MEGACACHE_TLS_KEY_FILE` | unset | PEM private key for HTTP and RESP TLS |
+| `MEGACACHE_LOG_FORMAT` | `json` | `json` or `text` server logs |
 
-Set `MEGACACHE_API_KEY` for every network-accessible deployment. Health and
-metrics endpoints remain public so infrastructure probes can reach them;
-restrict `/metrics` at the network or reverse-proxy layer when necessary.
+The native client also reads `MEGACACHE_CLI_HOST`,
+`MEGACACHE_CLI_PORT`, `MEGACACHE_CLI_USERNAME`,
+`MEGACACHE_CLI_PASSWORD`, `MEGACACHE_CLI_TLS`,
+`MEGACACHE_CLI_CA_FILE`, and `MEGACACHE_CLI_SERVER_NAME`.
+
+Use `mc init-users users.json` and configure `MEGACACHE_USERS_FILE` for every
+network-accessible deployment. `MEGACACHE_API_KEY` remains available for
+legacy administrator access. Health and metrics endpoints remain public so
+infrastructure probes can reach them; restrict `/metrics` at the network or
+reverse-proxy layer.
 
 ## Documentation
 
@@ -132,18 +149,16 @@ restrict `/metrics` at the network or reverse-proxy layer when necessary.
 - [HTTP API](docs/api.md)
 - [Architecture and guarantees](docs/architecture.md)
 - [Operations and deployment](docs/operations.md)
+- [Implementation roadmap](docs/roadmap.md)
 - [Contributing](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)
 
 ## Roadmap
 
-- Pluggable Valkey and Redis storage
-- Distributed tag indexes and refresh leases
-- Additional Redis command compatibility
-- Event-driven invalidation and database CDC connectors
-- Background revalidation and negative-cache policy
-- OpenTelemetry traces and language SDKs
-- Multi-tier local plus distributed caching
+Phase 1 production foundations are available in version 0.4. Distributed
+operation, origin protection, freshness automation, SDKs, cache intelligence,
+and the managed control plane are specified in the
+[implementation roadmap](docs/roadmap.md).
 
 ## License
 

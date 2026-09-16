@@ -20,6 +20,15 @@ When `MEGACACHE_API_KEY` is configured:
 redis-cli -h 127.0.0.1 -p 6380 --askpass
 ```
 
+Named users authenticate with:
+
+```text
+AUTH username password
+```
+
+The native CLI accepts `--username` and reads the password from
+`MEGACACHE_CLI_PASSWORD`.
+
 Set `REDISCLI_AUTH` for non-interactive development or automation. Avoid
 passing secrets directly on the command line because they can appear in shell
 history and process listings.

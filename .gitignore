@@ -5,6 +5,7 @@ __pycache__/
 .env
 .pytest_cache/
 .venv/
+users.json
+*.users.json
 build/
 dist/
-

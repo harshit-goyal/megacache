@@ -2,19 +2,24 @@
 
 import argparse
 import base64
+import getpass
 import json
 import logging
 import os
+import signal
 import sys
 import threading
 from dataclasses import replace
 from typing import Any, List, Optional, Sequence
 
+from .auth import hash_password, write_example_users_file
 from .client import MegaCacheClient, MegaCacheClientError
 from .config import Config
 from .engine import CacheEngine
+from .observability import configure_logging
 from .resp import MegaCacheRespServer
 from .server import MegaCacheServer
+from .transport import enable_server_tls, validate_tls_config
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -23,7 +28,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Run and interact with MegaCache.",
     )
     parser.add_argument(
-        "--version", action="version", version="MegaCache 0.3.1"
+        "--version", action="version", version="MegaCache 0.4.0"
     )
     parser.add_argument(
         "--host",
@@ -37,15 +42,38 @@ def build_parser() -> argparse.ArgumentParser:
         help="RESP server port (default: 6380)",
     )
     parser.add_argument(
+        "--username",
+        default=os.getenv("MEGACACHE_CLI_USERNAME"),
+        help="named user; defaults to legacy API-key authentication",
+    )
+    parser.add_argument(
         "--password",
-        default=os.getenv("MEGACACHE_API_KEY"),
-        help="server password; prefer MEGACACHE_API_KEY",
+        default=os.getenv("MEGACACHE_CLI_PASSWORD")
+        or os.getenv("MEGACACHE_API_KEY"),
+        help="server password; prefer MEGACACHE_CLI_PASSWORD",
     )
     parser.add_argument(
         "--timeout",
         type=float,
         default=5,
         help="connection timeout in seconds (default: 5)",
+    )
+    parser.add_argument(
+        "--tls",
+        action="store_true",
+        default=os.getenv("MEGACACHE_CLI_TLS", "").lower()
+        in ("1", "true", "yes"),
+        help="connect using TLS",
+    )
+    parser.add_argument(
+        "--ca-file",
+        default=os.getenv("MEGACACHE_CLI_CA_FILE"),
+        help="CA certificate used to verify the server",
+    )
+    parser.add_argument(
+        "--server-name",
+        default=os.getenv("MEGACACHE_CLI_SERVER_NAME"),
+        help="TLS server name override",
     )
     parser.add_argument(
         "--json",
@@ -117,6 +145,15 @@ def build_parser() -> argparse.ArgumentParser:
         "invalidate", help="invalidate entries by tag"
     )
     invalidate.add_argument("tags", nargs="+")
+
+    commands.add_parser(
+        "hash-password", help="prompt for and hash a password locally"
+    )
+    init_users = commands.add_parser(
+        "init-users", help="create a protected administrator users file"
+    )
+    init_users.add_argument("path")
+    init_users.add_argument("--username", default="admin")
     return parser
 
 
@@ -125,6 +162,10 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
     args = parser.parse_args(argv)
     if args.command in (None, "serve"):
         return _serve(args)
+    if args.command == "hash-password":
+        return _hash_password()
+    if args.command == "init-users":
+        return _init_users(args.path, args.username)
 
     if args.command == "flush" and not args.yes:
         parser.error("flush requires --yes")
@@ -135,8 +176,12 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
         with MegaCacheClient(
             host=args.host,
             port=args.port,
+            username=args.username,
             password=args.password,
             timeout=args.timeout,
+            tls=args.tls,
+            ca_file=args.ca_file,
+            server_name=args.server_name,
         ) as client:
             response = _execute(client, args)
     except (MegaCacheClientError, OSError, ValueError) as exc:
@@ -205,11 +250,9 @@ def _execute(client: MegaCacheClient, args: argparse.Namespace) -> Any:
 
 
 def _serve(args: argparse.Namespace) -> int:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
     config = Config.from_env()
+    configure_logging(config.log_format)
+    validate_tls_config(config)
     if getattr(args, "http_host", None) is not None:
         config = replace(config, host=args.http_host)
     if getattr(args, "http_port", None) is not None:
@@ -221,6 +264,8 @@ def _serve(args: argparse.Namespace) -> int:
 
     engine = CacheEngine(
         max_entries=config.max_entries,
+        max_memory_bytes=config.max_memory_bytes,
+        max_entry_bytes=config.max_entry_bytes,
         default_ttl_seconds=config.default_ttl_seconds,
         default_stale_seconds=config.default_stale_seconds,
         lease_seconds=config.lease_seconds,
@@ -229,20 +274,103 @@ def _serve(args: argparse.Namespace) -> int:
     resp_server = MegaCacheRespServer(
         (config.resp_host, config.resp_port), config, engine
     )
+    tls_enabled = enable_server_tls(http_server, config)
+    enable_server_tls(resp_server, config)
     resp_thread = threading.Thread(target=resp_server.serve_forever, daemon=True)
     resp_thread.start()
     logger = logging.getLogger("megacache")
     logger.info("HTTP API listening on %s:%s", config.host, config.port)
     logger.info("RESP2 API listening on %s:%s", config.resp_host, config.resp_port)
+    if tls_enabled:
+        logger.info("TLS enabled for HTTP and RESP2")
+
+    shutdown_started = threading.Event()
+    shutdown_threads: List[threading.Thread] = []
+
+    def shutdown() -> None:
+        if shutdown_started.is_set():
+            return
+        shutdown_started.set()
+        http_server.start_draining()
+        resp_server.start_draining()
+        http_server.shutdown()
+        resp_server.shutdown()
+        drain_threads = [
+            threading.Thread(
+                target=server.drain_connections,
+                args=(config.shutdown_grace_seconds,),
+                daemon=True,
+            )
+            for server in (http_server, resp_server)
+        ]
+        for drain_thread in drain_threads:
+            drain_thread.start()
+        for drain_thread in drain_threads:
+            drain_thread.join(config.shutdown_grace_seconds + 1)
+
+    previous_handlers = {}
+    if threading.current_thread() is threading.main_thread():
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            previous_handlers[signum] = signal.getsignal(signum)
+
+            def handle_signal(
+                received: int, frame: Any, signal_number: int = signum
+            ) -> None:
+                logger.info("shutdown requested by signal %s", signal_number)
+                shutdown_thread = threading.Thread(
+                    target=shutdown, daemon=True
+                )
+                shutdown_threads.append(shutdown_thread)
+                shutdown_thread.start()
+
+            signal.signal(signum, handle_signal)
     try:
         http_server.serve_forever()
     except KeyboardInterrupt:
-        pass
+        shutdown_thread = threading.Thread(target=shutdown, daemon=True)
+        shutdown_threads.append(shutdown_thread)
+        shutdown_thread.start()
     finally:
+        if shutdown_threads:
+            shutdown_threads[-1].join(
+                timeout=config.shutdown_grace_seconds + 5
+            )
+        else:
+            resp_server.shutdown()
         http_server.server_close()
-        resp_server.shutdown()
         resp_server.server_close()
         resp_thread.join(timeout=5)
+        for signum, previous in previous_handlers.items():
+            signal.signal(signum, previous)
+    return 0
+
+
+def _hash_password() -> int:
+    password = getpass.getpass("Password: ")
+    confirmation = getpass.getpass("Confirm password: ")
+    if password != confirmation:
+        print("mc: passwords do not match", file=sys.stderr)
+        return 1
+    try:
+        print(hash_password(password))
+    except ValueError as exc:
+        print("mc: {}".format(exc), file=sys.stderr)
+        return 1
+    return 0
+
+
+def _init_users(path: str, username: str) -> int:
+    password = getpass.getpass("Password for {}: ".format(username))
+    confirmation = getpass.getpass("Confirm password: ")
+    if password != confirmation:
+        print("mc: passwords do not match", file=sys.stderr)
+        return 1
+    try:
+        write_example_users_file(path, username, password)
+    except (OSError, ValueError) as exc:
+        print("mc: {}".format(exc), file=sys.stderr)
+        return 1
+    print(path)
     return 0
 
 

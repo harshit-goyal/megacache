@@ -1,6 +1,7 @@
 """Small RESP2 client used by the native MegaCache CLI."""
 
 import socket
+import ssl
 from typing import Any, BinaryIO, Optional, Sequence, Union
 
 
@@ -26,11 +27,20 @@ class MegaCacheClient:
         port: int = 6380,
         password: Optional[str] = None,
         timeout: float = 5,
+        *,
+        username: Optional[str] = None,
+        tls: bool = False,
+        ca_file: Optional[str] = None,
+        server_name: Optional[str] = None,
     ) -> None:
         self.host = host
         self.port = port
         self.password = password
+        self.username = username
         self.timeout = timeout
+        self.tls = tls
+        self.ca_file = ca_file
+        self.server_name = server_name
         self._socket: Optional[socket.socket] = None
         self._stream: Optional[BinaryIO] = None
 
@@ -45,12 +55,22 @@ class MegaCacheClient:
         if self._socket is not None:
             return
         try:
-            self._socket = socket.create_connection(
+            connection = socket.create_connection(
                 (self.host, self.port), timeout=self.timeout
             )
+            self._socket = connection
+            if self.tls:
+                context = ssl.create_default_context(cafile=self.ca_file)
+                connection = context.wrap_socket(
+                    connection, server_hostname=self.server_name or self.host
+                )
+            self._socket = connection
             self._stream = self._socket.makefile("rwb")
             if self.password is not None:
-                self.command("AUTH", self.password)
+                if self.username is None:
+                    self.command("AUTH", self.password)
+                else:
+                    self.command("AUTH", self.username, self.password)
         except Exception:
             self.close()
             raise
@@ -152,4 +172,3 @@ class MegaCacheClient:
         if isinstance(value, str):
             return value.encode("utf-8")
         raise TypeError("command parts must be strings, bytes, or integers")
-

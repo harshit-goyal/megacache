@@ -58,6 +58,7 @@ class CacheEngineTests(unittest.TestCase):
             self.cache.put("key", "bad", lease_token="wrong")
         self.cache.put("key", "value", lease_token=leader.lease_token)
         self.assertEqual("value", self.cache.get("key").value)
+        self.assertEqual(0, self.cache.stats()["lease_memory_bytes"])
 
     def test_stale_value_can_be_refreshed_under_lease(self):
         self.cache.put("key", "old")
@@ -105,6 +106,74 @@ class CacheEngineTests(unittest.TestCase):
             self.cache.put("key", "value", ttl_seconds=0)
         with self.assertRaises(ValueError):
             self.cache.put("key", "value", tags="not-an-array")
+
+    def test_byte_limit_evicts_lru_entry(self):
+        cache = CacheEngine(
+            max_entries=10,
+            max_memory_bytes=300,
+            max_entry_bytes=250,
+        )
+        cache.put("a", "a" * 100)
+        cache.put("b", "b" * 100)
+        self.assertEqual("miss", cache.get("a").state)
+        self.assertEqual("fresh", cache.get("b").state)
+        self.assertLessEqual(cache.stats()["memory_bytes"], 300)
+
+    def test_oversized_entry_is_rejected_without_eviction(self):
+        cache = CacheEngine(
+            max_entries=10,
+            max_memory_bytes=1_000,
+            max_entry_bytes=200,
+        )
+        cache.put("existing", "ok")
+        with self.assertRaisesRegex(ValueError, "maximum"):
+            cache.put("large", "x" * 200)
+        self.assertEqual("fresh", cache.get("existing").state)
+        self.assertEqual(1, cache.stats()["rejected_entries_total"])
+
+    def test_mutable_values_are_snapshotted_and_defensively_copied(self):
+        original = {"items": []}
+        self.cache.put("key", original)
+        original["items"].append("outside")
+        cached = self.cache.get("key").value
+        self.assertEqual({"items": []}, cached)
+        cached["items"].append("returned")
+        self.assertEqual({"items": []}, self.cache.get("key").value)
+
+    def test_leases_are_bounded_and_accounted(self):
+        cache = CacheEngine(
+            max_entries=1,
+            max_memory_bytes=1_000,
+            max_entry_bytes=500,
+        )
+        cache.acquire_lease("first")
+        self.assertGreater(cache.stats()["lease_memory_bytes"], 0)
+        with self.assertRaisesRegex(ValueError, "lease capacity"):
+            cache.acquire_lease("second")
+        self.assertEqual(1, cache.stats()["rejected_leases_total"])
+
+    def test_expired_leases_release_memory_capacity(self):
+        clock = FakeClock()
+        cache = CacheEngine(
+            max_entries=1,
+            default_ttl_seconds=10,
+            default_stale_seconds=10,
+            lease_seconds=5,
+            clock=clock,
+            max_memory_bytes=1_000,
+            max_entry_bytes=500,
+        )
+        cache.acquire_lease("first")
+        clock.advance(6)
+        cache.acquire_lease("second")
+        self.assertEqual(1, cache.stats()["active_leases"])
+
+    def test_original_positional_constructor_order_is_preserved(self):
+        clock = FakeClock()
+        cache = CacheEngine(100, 60, 120, 5, clock)
+        cache.put("key", "value")
+        clock.advance(61)
+        self.assertEqual("stale", cache.get("key").state)
 
 
 if __name__ == "__main__":

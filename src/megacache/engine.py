@@ -1,6 +1,8 @@
 """Thread-safe cache engine with stale reads, tags, leases, and singleflight."""
 
+import copy
 import math
+import json
 import secrets
 import threading
 import time
@@ -25,12 +27,14 @@ class _Entry:
     fresh_until: float
     stale_until: float
     tags: FrozenSet[str]
+    size_bytes: int
 
 
 @dataclass
 class _Lease:
     token: str
     until: float
+    size_bytes: int
 
 
 class _Flight:
@@ -50,24 +54,49 @@ class CacheEngine:
         default_stale_seconds: int = 900,
         lease_seconds: int = 30,
         clock: Callable[[], float] = time.monotonic,
+        *,
+        max_memory_bytes: int = 67_108_864,
+        max_entry_bytes: int = 1_048_576,
     ) -> None:
         if min(
             max_entries,
+            max_memory_bytes,
+            max_entry_bytes,
             default_ttl_seconds,
             default_stale_seconds,
             lease_seconds,
         ) <= 0:
             raise ValueError("cache limits and durations must be greater than zero")
         self._max_entries = max_entries
+        self._max_memory_bytes = max_memory_bytes
+        self._max_entry_bytes = max_entry_bytes
         self._default_ttl = default_ttl_seconds
         self._default_stale = default_stale_seconds
         self._lease_seconds = lease_seconds
         self._clock = clock
         self._entries: "OrderedDict[str, _Entry]" = OrderedDict()
+        self._used_bytes = 0
+        self._lease_bytes = 0
         self._tags: Dict[str, set] = defaultdict(set)
         self._leases: Dict[str, _Lease] = {}
         self._flights: Dict[str, _Flight] = {}
         self._metrics: Dict[str, int] = defaultdict(int)
+        self._request_counts: Dict[Tuple[str, str, str], int] = defaultdict(int)
+        self._latency_counts: Dict[Tuple[str, str, float], int] = defaultdict(int)
+        self._latency_sums: Dict[Tuple[str, str], float] = defaultdict(float)
+        self._latency_buckets = (
+            0.001,
+            0.005,
+            0.01,
+            0.025,
+            0.05,
+            0.1,
+            0.25,
+            0.5,
+            1.0,
+            2.5,
+            5.0,
+        )
         self._lock = threading.RLock()
 
     def get(self, key: str) -> CacheResult:
@@ -100,27 +129,51 @@ class CacheEngine:
                 allow_zero=True,
             )
         normalized_tags = frozenset(self._normalize_tags(tags))
+        stored_value = self._snapshot_value(value)
+        size_bytes = self._entry_size(key, stored_value, normalized_tags)
+        if size_bytes > self._max_entry_bytes:
+            with self._lock:
+                self._metrics["rejected_entries_total"] += 1
+            raise ValueError(
+                "entry requires {} bytes; maximum is {}".format(
+                    size_bytes, self._max_entry_bytes
+                )
+            )
+        if size_bytes > self._max_memory_bytes:
+            with self._lock:
+                self._metrics["rejected_entries_total"] += 1
+            raise ValueError("entry exceeds total cache memory limit")
         now = self._clock()
 
         with self._lock:
             if lease_token is not None:
                 lease = self._leases.get(key)
                 if lease is None or lease.until <= now:
-                    self._leases.pop(key, None)
+                    self._remove_lease(key)
                     raise ValueError("lease is missing or expired")
                 if not secrets.compare_digest(lease.token, lease_token):
                     raise ValueError("lease token does not match")
 
+            existing_lease = self._leases.get(key)
+            reserved_bytes = self._lease_bytes - (
+                0 if existing_lease is None else existing_lease.size_bytes
+            )
+            if size_bytes + reserved_bytes > self._max_memory_bytes:
+                self._metrics["rejected_entries_total"] += 1
+                raise ValueError("entry exceeds available cache memory")
+
             self._remove_entry(key)
             self._entries[key] = _Entry(
-                value=value,
+                value=stored_value,
                 fresh_until=now + ttl,
                 stale_until=now + ttl + stale,
                 tags=normalized_tags,
+                size_bytes=size_bytes,
             )
+            self._used_bytes += size_bytes
             for tag in normalized_tags:
                 self._tags[tag].add(key)
-            self._leases.pop(key, None)
+            self._remove_lease(key)
             self._metrics["writes_total"] += 1
             self._evict_if_needed()
             return self._lookup(key, count=False)
@@ -132,8 +185,21 @@ class CacheEngine:
 
     def mset(self, values: Iterable[Tuple[str, Any]]) -> None:
         normalized = tuple(values)
-        for key, _ in normalized:
+        for key, value in normalized:
             self._validate_key(key)
+            size_bytes = self._entry_size(key, value, frozenset())
+            if (
+                size_bytes > self._max_entry_bytes
+                or size_bytes > self._max_memory_bytes
+            ):
+                with self._lock:
+                    self._metrics["rejected_entries_total"] += 1
+                raise ValueError(
+                    "entry requires {} bytes; maximum is {}".format(
+                        size_bytes,
+                        min(self._max_entry_bytes, self._max_memory_bytes),
+                    )
+                )
         with self._lock:
             for key, value in normalized:
                 self.put(key, value, persistent=True)
@@ -142,7 +208,7 @@ class CacheEngine:
         self._validate_key(key)
         with self._lock:
             existed = self._remove_entry(key)
-            self._leases.pop(key, None)
+            self._remove_lease(key)
             if existed:
                 self._metrics["deletes_total"] += 1
             return existed
@@ -174,6 +240,19 @@ class CacheEngine:
             self._metrics["expirations_set_total"] += 1
             return True
 
+    def _remove_lease(self, key: str) -> bool:
+            lease = self._leases.pop(key, None)
+            if lease is None:
+                return False
+            self._used_bytes -= lease.size_bytes
+            self._lease_bytes -= lease.size_bytes
+            return True
+
+    def _purge_expired_leases(self, now: float) -> None:
+            for key, lease in tuple(self._leases.items()):
+                if lease.until <= now:
+                    self._remove_lease(key)
+
     def ttl(self, key: str) -> int:
         self._validate_key(key)
         with self._lock:
@@ -190,6 +269,8 @@ class CacheEngine:
             self._entries.clear()
             self._tags.clear()
             self._leases.clear()
+            self._used_bytes = 0
+            self._lease_bytes = 0
             self._metrics["flushes_total"] += 1
             return removed
 
@@ -213,6 +294,7 @@ class CacheEngine:
         self._validate_key(key)
         now = self._clock()
         with self._lock:
+            self._purge_expired_leases(now)
             cached = self._lookup(key, count=True)
             if cached.state == "fresh":
                 return cached
@@ -229,7 +311,22 @@ class CacheEngine:
                 )
 
             token = secrets.token_urlsafe(24)
-            self._leases[key] = _Lease(token=token, until=now + self._lease_seconds)
+            size_bytes = (
+                len(key.encode("utf-8")) + len(token.encode("ascii")) + 64
+            )
+            if (
+                len(self._leases) >= self._max_entries
+                or self._used_bytes + size_bytes > self._max_memory_bytes
+            ):
+                self._metrics["rejected_leases_total"] += 1
+                raise ValueError("lease capacity exhausted")
+            self._leases[key] = _Lease(
+                token=token,
+                until=now + self._lease_seconds,
+                size_bytes=size_bytes,
+            )
+            self._used_bytes += size_bytes
+            self._lease_bytes += size_bytes
             self._metrics["leases_total"] += 1
             if cached.state == "stale":
                 return CacheResult(
@@ -293,25 +390,127 @@ class CacheEngine:
 
     def stats(self) -> Dict[str, int]:
         with self._lock:
+            self._purge_expired_leases(self._clock())
             snapshot = dict(self._metrics)
             snapshot["entries"] = self.size()
+            snapshot["memory_bytes"] = self._used_bytes
+            snapshot["lease_memory_bytes"] = self._lease_bytes
+            snapshot["memory_limit_bytes"] = self._max_memory_bytes
             snapshot["tags"] = len(self._tags)
             snapshot["active_leases"] = sum(
                 1 for lease in self._leases.values() if lease.until > self._clock()
             )
+            snapshot["protocol_requests_total"] = sum(
+                self._request_counts.values()
+            )
+            snapshot["request_errors_total"] = sum(
+                count
+                for (_, _, status), count in self._request_counts.items()
+                if status == "error"
+            )
             return snapshot
 
+    def observe_request(
+        self,
+        protocol: str,
+        operation: str,
+        duration_seconds: float,
+        success: bool,
+    ) -> None:
+        status = "success" if success else "error"
+        with self._lock:
+            self._request_counts[(protocol, operation, status)] += 1
+            self._latency_sums[(protocol, operation)] += duration_seconds
+            for bucket in self._latency_buckets:
+                if duration_seconds <= bucket:
+                    self._latency_counts[(protocol, operation, bucket)] += 1
+
     def prometheus_metrics(self) -> str:
-        stats = self.stats()
-        lines = [
-            "# HELP megacache_{} MegaCache metric.".format(name)
-            for name in sorted(stats)
-        ]
-        values = [
-            "# TYPE megacache_{} gauge\nmegacache_{} {}".format(name, name, value)
-            for name, value in sorted(stats.items())
-        ]
-        return "\n".join(lines + values) + "\n"
+        with self._lock:
+            stats = self.stats()
+            lines = []
+            for name, value in sorted(stats.items()):
+                metric_type = (
+                    "gauge"
+                    if name in (
+                        "entries",
+                        "tags",
+                        "active_leases",
+                        "memory_bytes",
+                        "lease_memory_bytes",
+                        "memory_limit_bytes",
+                    )
+                    else "counter"
+                )
+                lines.extend(
+                    [
+                        "# HELP megacache_{} MegaCache metric.".format(name),
+                        "# TYPE megacache_{} {}".format(name, metric_type),
+                        "megacache_{} {}".format(name, value),
+                    ]
+                )
+            lines.extend(
+                [
+                    "# HELP megacache_requests_total Requests by protocol, operation, and status.",
+                    "# TYPE megacache_requests_total counter",
+                ]
+            )
+            for labels, value in sorted(self._request_counts.items()):
+                protocol, operation, status = labels
+                lines.append(
+                    'megacache_requests_total{{protocol="{}",operation="{}",status="{}"}} {}'.format(
+                        self._prometheus_label(protocol),
+                        self._prometheus_label(operation),
+                        self._prometheus_label(status),
+                        value,
+                    )
+                )
+            lines.extend(
+                [
+                    "# HELP megacache_request_duration_seconds Request latency.",
+                    "# TYPE megacache_request_duration_seconds histogram",
+                ]
+            )
+            operations = sorted(self._latency_sums)
+            for protocol, operation in operations:
+                label = 'protocol="{}",operation="{}"'.format(
+                    self._prometheus_label(protocol),
+                    self._prometheus_label(operation),
+                )
+                for bucket in self._latency_buckets:
+                    lines.append(
+                        'megacache_request_duration_seconds_bucket{{{},le="{}"}} {}'.format(
+                            label,
+                            bucket,
+                            self._latency_counts[
+                                (protocol, operation, bucket)
+                            ],
+                        )
+                    )
+                count = sum(
+                    value
+                    for (item_protocol, item_operation, _), value
+                    in self._request_counts.items()
+                    if item_protocol == protocol and item_operation == operation
+                )
+                lines.extend(
+                    [
+                        'megacache_request_duration_seconds_bucket{{{},le="+Inf"}} {}'.format(
+                            label, count
+                        ),
+                        "megacache_request_duration_seconds_sum{{{}}} {}".format(
+                            label, self._latency_sums[(protocol, operation)]
+                        ),
+                        "megacache_request_duration_seconds_count{{{}}} {}".format(
+                            label, count
+                        ),
+                    ]
+                )
+            return "\n".join(lines) + "\n"
+
+    @staticmethod
+    def _prometheus_label(value: str) -> str:
+        return value.replace("\\", "\\\\").replace("\n", "\\n").replace('"', '\\"')
 
     def _lookup(self, key: str, count: bool) -> CacheResult:
         now = self._clock()
@@ -333,14 +532,14 @@ class CacheEngine:
                 self._metrics["hits_total"] += 1
             return CacheResult(
                 state="fresh",
-                value=entry.value,
+                value=self._copy_value(entry.value),
                 expires_in_seconds=max(0, entry.fresh_until - now),
             )
         if count:
             self._metrics["stale_hits_total"] += 1
         return CacheResult(
             state="stale",
-            value=entry.value,
+            value=self._copy_value(entry.value),
             stale_for_seconds=max(0, entry.stale_until - now),
         )
 
@@ -348,6 +547,7 @@ class CacheEngine:
         entry = self._entries.pop(key, None)
         if entry is None:
             return False
+        self._used_bytes -= entry.size_bytes
         for tag in entry.tags:
             keys = self._tags.get(tag)
             if keys is not None:
@@ -357,10 +557,55 @@ class CacheEngine:
         return True
 
     def _evict_if_needed(self) -> None:
-        while len(self._entries) > self._max_entries:
+        while (
+            len(self._entries) > self._max_entries
+            or self._used_bytes > self._max_memory_bytes
+        ):
             key = next(iter(self._entries))
             self._remove_entry(key)
             self._metrics["evictions_total"] += 1
+
+    @staticmethod
+    def _entry_size(key: str, value: Any, tags: FrozenSet[str]) -> int:
+        if isinstance(value, bytes):
+            value_bytes = len(value)
+        elif isinstance(value, str):
+            value_bytes = len(value.encode("utf-8"))
+        else:
+            try:
+                value_bytes = len(
+                    json.dumps(
+                        value, separators=(",", ":"), ensure_ascii=False
+                    ).encode("utf-8")
+                )
+            except (TypeError, ValueError) as exc:
+                raise ValueError("value must be JSON serializable or bytes") from exc
+        metadata_bytes = (
+            len(key.encode("utf-8"))
+            + sum(len(tag.encode("utf-8")) for tag in tags)
+            + 128
+        )
+        return value_bytes + metadata_bytes
+
+    @staticmethod
+    def _snapshot_value(value: Any) -> Any:
+        if isinstance(value, bytes):
+            return bytes(value)
+        if isinstance(value, str):
+            return value
+        try:
+            encoded = json.dumps(
+                value, separators=(",", ":"), ensure_ascii=False
+            )
+            return json.loads(encoded)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("value must be JSON serializable or bytes") from exc
+
+    @staticmethod
+    def _copy_value(value: Any) -> Any:
+        if isinstance(value, (bytes, str)):
+            return value
+        return copy.deepcopy(value)
 
     @staticmethod
     def _validate_key(key: str) -> None:

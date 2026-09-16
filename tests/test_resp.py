@@ -17,6 +17,12 @@ class RespClient:
         self.socket.close()
 
     def command(self, *parts):
+        self.stream.write(self.encode_command(*parts))
+        self.stream.flush()
+        return self._read()
+
+    @staticmethod
+    def encode_command(*parts):
         encoded = [
             part if isinstance(part, bytes) else str(part).encode("utf-8")
             for part in parts
@@ -30,9 +36,7 @@ class RespClient:
                 + part
                 + b"\r\n"
             )
-        self.stream.write(payload)
-        self.stream.flush()
-        return self._read()
+        return payload
 
     def _read(self):
         marker = self.stream.read(1)
@@ -68,11 +72,18 @@ class RespServerTests(unittest.TestCase):
             resp_host="127.0.0.1",
             resp_port=0,
             max_entries=100,
+            max_memory_bytes=1_000_000,
+            max_entry_bytes=10_000,
             max_body_bytes=10_000,
             default_ttl_seconds=60,
             default_stale_seconds=60,
             lease_seconds=10,
+            shutdown_grace_seconds=1,
             api_key="secret",
+            tls_cert_file=None,
+            tls_key_file=None,
+            users_file=None,
+            log_format="text",
         )
         cls.engine = CacheEngine(max_entries=100)
         cls.server = MegaCacheRespServer(("127.0.0.1", 0), config, cls.engine)
@@ -147,6 +158,28 @@ class RespServerTests(unittest.TestCase):
         self.assertEqual(b"server", hello[0])
         error = self.client.command("HELLO", 3)
         self.assertIsInstance(error, RuntimeError)
+
+    def test_pipelined_commands_return_ordered_responses(self):
+        self.authenticate()
+        payload = (
+            self.client.encode_command("SET", "a", "1")
+            + self.client.encode_command("GET", "a")
+            + self.client.encode_command("EXISTS", "a", "missing")
+        )
+        self.client.stream.write(payload)
+        self.client.stream.flush()
+        self.assertEqual("OK", self.client._read())
+        self.assertEqual(b"1", self.client._read())
+        self.assertEqual(1, self.client._read())
+
+    def test_unknown_commands_use_bounded_metric_label(self):
+        self.authenticate()
+        for command in ("UNIQUE-A", "UNIQUE-B"):
+            self.assertIsInstance(self.client.command(command), RuntimeError)
+        metrics = self.engine.prometheus_metrics()
+        self.assertIn('operation="UNKNOWN"', metrics)
+        self.assertNotIn('operation="UNIQUE-A"', metrics)
+        self.assertNotIn('operation="UNIQUE-B"', metrics)
 
 
 if __name__ == "__main__":

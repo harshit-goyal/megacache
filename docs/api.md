@@ -3,8 +3,10 @@
 This document covers the HTTP protocol. For `redis-cli` and RESP2 clients, see
 the [RESP command reference](resp.md).
 
-All `/v1/*` endpoints require `Authorization: Bearer <key>` when
-`MEGACACHE_API_KEY` is configured. Keys are URL-path components and should be
+All `/v1/*` endpoints require authentication when an API key or users file is
+configured. Legacy API keys use `Authorization: Bearer <key>`. Named users use
+HTTP Basic authentication over TLS. Named-user permissions and key prefixes
+are enforced for every operation. Keys are URL-path components and should be
 percent encoded.
 
 ## Cache entries

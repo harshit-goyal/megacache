@@ -55,6 +55,25 @@ export MEGACACHE_API_KEY='replace-with-a-long-random-secret'
 make run
 ```
 
+For scoped named users, create a protected users file interactively:
+
+```bash
+mc init-users users.json --username admin
+export MEGACACHE_USERS_FILE="$PWD/users.json"
+mc serve
+```
+
+Use named credentials from the native client:
+
+```bash
+export MEGACACHE_CLI_USERNAME=admin
+export MEGACACHE_CLI_PASSWORD='the-password-entered-during-init'
+mc ping
+```
+
+`mc hash-password` prints a salted PBKDF2 hash for adding more users to the
+file. See [Security](../SECURITY.md) for its format and permission model.
+
 The examples below use this shell variable:
 
 ```bash
@@ -141,6 +160,12 @@ Connection flags also precede the subcommand:
 
 ```bash
 mc --host cache.internal --port 6380 ping
+```
+
+Connect through TLS:
+
+```bash
+mc --host cache.example.com --tls --ca-file ./ca.pem ping
 ```
 
 The native command reads its password from `MEGACACHE_API_KEY`. The complete
@@ -358,6 +383,6 @@ python3 -m pip wheel --no-deps --wheel-dir dist .
 Install the generated wheel:
 
 ```bash
-python3 -m pip install dist/megacache-0.3.1-py3-none-any.whl
+python3 -m pip install dist/megacache-0.4.0-py3-none-any.whl
 mc
 ```

@@ -19,11 +19,18 @@ class NativeClientTests(unittest.TestCase):
             resp_host="127.0.0.1",
             resp_port=0,
             max_entries=100,
+            max_memory_bytes=1_000_000,
+            max_entry_bytes=10_000,
             max_body_bytes=10_000,
             default_ttl_seconds=60,
             default_stale_seconds=60,
             lease_seconds=10,
+            shutdown_grace_seconds=1,
             api_key="secret",
+            tls_cert_file=None,
+            tls_key_file=None,
+            users_file=None,
+            log_format="text",
         )
         cls.engine = CacheEngine(max_entries=100)
         cls.server = MegaCacheRespServer(("127.0.0.1", 0), config, cls.engine)
@@ -46,6 +53,12 @@ class NativeClientTests(unittest.TestCase):
         ) as client:
             self.assertEqual("OK", client.command("SET", "key", b"\x00\xff"))
             self.assertEqual(b"\x00\xff", client.command("GET", "key"))
+
+    def test_original_positional_client_authentication_is_preserved(self):
+        with MegaCacheClient(
+            "127.0.0.1", self.port, "secret", 2
+        ) as client:
+            self.assertEqual("PONG", client.command("PING"))
 
     def test_client_surfaces_server_errors(self):
         with MegaCacheClient(port=self.port) as client:
@@ -112,7 +125,7 @@ class NativeClientTests(unittest.TestCase):
         with redirect_stdout(output), self.assertRaises(SystemExit) as exit_status:
             run(["--version"])
         self.assertEqual(0, exit_status.exception.code)
-        self.assertEqual("MegaCache 0.3.1", output.getvalue().strip())
+        self.assertEqual("MegaCache 0.4.0", output.getvalue().strip())
 
 
 if __name__ == "__main__":

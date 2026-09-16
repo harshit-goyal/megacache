@@ -1,13 +1,16 @@
 """RESP2 server and Redis-compatible command subset."""
 
-import hmac
 import json
 import logging
+import socket
 import socketserver
-from typing import Any, List, Optional, Sequence, Tuple
+import time
+from typing import Any, Iterable, List, Optional, Sequence, Tuple
 
+from .auth import AuthManager, Principal
 from .config import Config
 from .engine import CacheEngine, CacheResult
+from .transport import TLSRequestMixin
 
 LOG = logging.getLogger("megacache.resp")
 
@@ -24,15 +27,16 @@ class _SimpleString(str):
     pass
 
 
-class MegaCacheRespServer(socketserver.ThreadingTCPServer):
+class MegaCacheRespServer(TLSRequestMixin, socketserver.ThreadingTCPServer):
     allow_reuse_address = True
-    daemon_threads = True
+    daemon_threads = False
 
     def __init__(self, address: tuple, config: Config, engine: CacheEngine):
+        self.initialize_transport()
         self.config = config
         self.engine = engine
+        self.auth = AuthManager(config.api_key, config.users_file)
         super().__init__(address, MegaCacheRespHandler)
-
 
 class MegaCacheRespHandler(socketserver.StreamRequestHandler):
     server: MegaCacheRespServer
@@ -40,32 +44,95 @@ class MegaCacheRespHandler(socketserver.StreamRequestHandler):
     def setup(self) -> None:
         super().setup()
         self.request.settimeout(30)
-        self.authenticated = self.server.config.api_key is None
+        self.principal = self.server.auth.anonymous()
 
     def handle(self) -> None:
         while True:
+            started = None
+            operation = "PROTOCOL"
             try:
                 request = self._read_request()
                 if request is None:
                     return
+                started = time.perf_counter()
+                operation = self._operation_label(request)
                 response, close = self._execute(request)
                 self.wfile.write(self._encode(response))
                 self.wfile.flush()
-                if close:
+                self._observe(operation, started, True)
+                if close or self.server.is_draining:
                     return
             except RespCommandError as exc:
                 self.wfile.write(self._error(str(exc)))
                 self.wfile.flush()
+                if started is not None:
+                    self._observe(operation, started, False)
             except RespProtocolError as exc:
                 self.wfile.write(self._error("Protocol error: {}".format(exc)))
                 self.wfile.flush()
+                if started is not None:
+                    self._observe(operation, started, False)
                 return
-            except (ConnectionError, TimeoutError):
+            except (ConnectionError, socket.timeout, TimeoutError):
                 return
             except Exception:
                 LOG.exception("unexpected RESP command failure")
                 self.wfile.write(self._error("internal server error"))
                 self.wfile.flush()
+                if started is not None:
+                    self._observe(operation, started, False)
+                return
+
+    def _observe(self, operation: str, started: float, success: bool) -> None:
+        duration = time.perf_counter() - started
+        self.server.engine.observe_request(
+            "resp", operation, duration, success
+        )
+        LOG.info(
+            "command",
+            extra={
+                "protocol": "resp",
+                "operation": operation,
+                "status": "success" if success else "error",
+                "duration_ms": round(duration * 1000, 3),
+                "remote": self.client_address[0],
+                "username": (
+                    None if self.principal is None else self.principal.username
+                ),
+            },
+        )
+
+    @staticmethod
+    def _operation_label(request: Sequence[bytes]) -> str:
+        try:
+            command = request[0].decode("ascii").upper()
+        except UnicodeDecodeError:
+            return "UNKNOWN"
+        supported = {
+            "AUTH",
+            "PING",
+            "ECHO",
+            "GET",
+            "SET",
+            "MGET",
+            "MSET",
+            "DEL",
+            "EXISTS",
+            "EXPIRE",
+            "TTL",
+            "DBSIZE",
+            "FLUSHDB",
+            "INFO",
+            "SELECT",
+            "CLIENT",
+            "COMMAND",
+            "HELLO",
+            "QUIT",
+            "MC.SET",
+            "MC.LEASE",
+            "MC.INVALIDATE",
+        }
+        return command if command in supported else "UNKNOWN"
 
     def _read_request(self) -> Optional[List[bytes]]:
         first = self.rfile.read(1)
@@ -119,7 +186,7 @@ class MegaCacheRespHandler(socketserver.StreamRequestHandler):
 
         if command == "AUTH":
             return self._auth(args), False
-        if not self.authenticated:
+        if self.principal is None:
             raise RespCommandError("NOAUTH Authentication required.")
 
         handlers = {
@@ -161,21 +228,34 @@ class MegaCacheRespHandler(socketserver.StreamRequestHandler):
 
     def _auth(self, args: Sequence[bytes]) -> _SimpleString:
         if len(args) == 2:
-            supplied = args[1]
-        elif len(args) == 3 and args[1] == b"default":
-            supplied = args[2]
+            username = None
+            password = args[1]
+        elif len(args) == 3:
+            username = args[1]
+            password = args[2]
         else:
             raise RespCommandError(
                 "wrong number of arguments for 'auth' command"
             )
-        expected = self.server.config.api_key
-        if expected is None:
+        if not self.server.auth.required:
             raise RespCommandError(
                 "AUTH called without any password configured"
             )
-        if not hmac.compare_digest(supplied, expected.encode("utf-8")):
+        try:
+            decoded_username = (
+                None if username is None else username.decode("utf-8")
+            )
+            decoded_password = password.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise RespCommandError(
+                "WRONGPASS invalid username-password pair"
+            ) from exc
+        principal = self.server.auth.authenticate(
+            decoded_username, decoded_password
+        )
+        if principal is None:
             raise RespCommandError("WRONGPASS invalid username-password pair")
-        self.authenticated = True
+        self.principal = principal
         return _SimpleString("OK")
 
     def _ping(self, args: Sequence[bytes]) -> Any:
@@ -190,12 +270,16 @@ class MegaCacheRespHandler(socketserver.StreamRequestHandler):
 
     def _get(self, args: Sequence[bytes]) -> Optional[bytes]:
         self._require_arity(args, 2)
-        result = self.server.engine.get(self._key(args[1]))
+        key = self._key(args[1])
+        self._authorize("read", (key,))
+        result = self.server.engine.get(key)
         return None if result.state == "miss" else self._value_bytes(result.value)
 
     def _set(self, args: Sequence[bytes]) -> _SimpleString:
         if len(args) not in (3, 5):
             raise RespCommandError("syntax error")
+        key = self._key(args[1])
+        self._authorize("write", (key,))
         ttl = None
         persistent = True
         if len(args) == 5:
@@ -204,7 +288,7 @@ class MegaCacheRespHandler(socketserver.StreamRequestHandler):
             ttl = self._positive_arg(args[4], "expire time")
             persistent = False
         self.server.engine.put(
-            self._key(args[1]),
+            key,
             args[2],
             ttl_seconds=ttl,
             stale_seconds=0 if ttl is not None else None,
@@ -215,7 +299,9 @@ class MegaCacheRespHandler(socketserver.StreamRequestHandler):
     def _mget(self, args: Sequence[bytes]) -> List[Optional[bytes]]:
         if len(args) < 2:
             raise RespCommandError("wrong number of arguments for 'mget' command")
-        results = self.server.engine.mget(self._keys(args[1:]))
+        keys = self._keys(args[1:])
+        self._authorize("read", keys)
+        results = self.server.engine.mget(keys)
         return [
             None if result.state == "miss" else self._value_bytes(result.value)
             for result in results
@@ -228,47 +314,59 @@ class MegaCacheRespHandler(socketserver.StreamRequestHandler):
             (self._key(args[index]), args[index + 1])
             for index in range(1, len(args), 2)
         ]
+        self._authorize("write", (key for key, _ in pairs))
         self.server.engine.mset(pairs)
         return _SimpleString("OK")
 
     def _delete(self, args: Sequence[bytes]) -> int:
         if len(args) < 2:
             raise RespCommandError("wrong number of arguments for 'del' command")
-        return self.server.engine.delete_many(self._keys(args[1:]))
+        keys = self._keys(args[1:])
+        self._authorize("write", keys)
+        return self.server.engine.delete_many(keys)
 
     def _exists(self, args: Sequence[bytes]) -> int:
         if len(args) < 2:
             raise RespCommandError(
                 "wrong number of arguments for 'exists' command"
             )
-        return self.server.engine.exists(self._keys(args[1:]))
+        keys = self._keys(args[1:])
+        self._authorize("read", keys)
+        return self.server.engine.exists(keys)
 
     def _expire(self, args: Sequence[bytes]) -> int:
         self._require_arity(args, 3)
+        key = self._key(args[1])
+        self._authorize("write", (key,))
         ttl = self._positive_arg(args[2], "expire time")
-        return int(self.server.engine.expire(self._key(args[1]), ttl))
+        return int(self.server.engine.expire(key, ttl))
 
     def _ttl(self, args: Sequence[bytes]) -> int:
         self._require_arity(args, 2)
-        return self.server.engine.ttl(self._key(args[1]))
+        key = self._key(args[1])
+        self._authorize("read", (key,))
+        return self.server.engine.ttl(key)
 
     def _dbsize(self, args: Sequence[bytes]) -> int:
         self._require_arity(args, 1)
+        self._authorize("admin")
         return self.server.engine.size()
 
     def _flushdb(self, args: Sequence[bytes]) -> _SimpleString:
         self._require_arity(args, 1)
+        self._authorize("admin")
         self.server.engine.flush()
         return _SimpleString("OK")
 
     def _info(self, args: Sequence[bytes]) -> bytes:
         if len(args) > 2:
             raise RespCommandError("wrong number of arguments for 'info' command")
+        self._authorize("admin")
         stats = self.server.engine.stats()
         lines = [
             "# Server",
             "redis_version:7.2.0",
-            "megacache_version:0.3.1",
+            "megacache_version:0.4.0",
             "redis_mode:standalone",
             "# Keyspace",
             "db0:keys={}".format(self.server.engine.size()),
@@ -281,11 +379,13 @@ class MegaCacheRespHandler(socketserver.StreamRequestHandler):
 
     def _select(self, args: Sequence[bytes]) -> _SimpleString:
         self._require_arity(args, 2)
+        self._authorize("read")
         if args[1] != b"0":
             raise RespCommandError("DB index is out of range")
         return _SimpleString("OK")
 
     def _client(self, args: Sequence[bytes]) -> Any:
+        self._authorize("read")
         if len(args) >= 2 and args[1].upper() == b"SETINFO":
             return _SimpleString("OK")
         if len(args) == 2 and args[1].upper() == b"GETNAME":
@@ -293,16 +393,18 @@ class MegaCacheRespHandler(socketserver.StreamRequestHandler):
         raise RespCommandError("unsupported CLIENT subcommand")
 
     def _command(self, args: Sequence[bytes]) -> List[Any]:
+        self._authorize("read")
         return []
 
     def _hello(self, args: Sequence[bytes]) -> List[Any]:
+        self._authorize("read")
         if len(args) != 2 or args[1] != b"2":
             raise RespCommandError("only RESP2 is supported")
         return [
             b"server",
             b"megacache",
             b"version",
-            b"0.3.1",
+            b"0.4.0",
             b"proto",
             2,
             b"mode",
@@ -314,6 +416,8 @@ class MegaCacheRespHandler(socketserver.StreamRequestHandler):
             raise RespCommandError(
                 "wrong number of arguments for 'mc.set' command"
             )
+        key = self._key(args[1])
+        self._authorize("write", (key,))
         ttl = None
         stale = None
         lease_token = None
@@ -354,7 +458,7 @@ class MegaCacheRespHandler(socketserver.StreamRequestHandler):
             else:
                 raise RespCommandError("unknown MC.SET option")
         self.server.engine.put(
-            self._key(args[1]),
+            key,
             args[2],
             ttl_seconds=ttl,
             stale_seconds=stale,
@@ -365,7 +469,10 @@ class MegaCacheRespHandler(socketserver.StreamRequestHandler):
 
     def _mc_lease(self, args: Sequence[bytes]) -> List[Any]:
         self._require_arity(args, 2)
-        result = self.server.engine.acquire_lease(self._key(args[1]))
+        key = self._key(args[1])
+        self._authorize("read", (key,))
+        self._authorize("write", (key,))
+        result = self.server.engine.acquire_lease(key)
         values: List[Any] = [result.state.encode("ascii")]
         if result.state in ("fresh", "stale"):
             values.append(self._value_bytes(result.value))
@@ -387,11 +494,19 @@ class MegaCacheRespHandler(socketserver.StreamRequestHandler):
             raise RespCommandError(
                 "wrong number of arguments for 'mc.invalidate' command"
             )
+        self._authorize("invalidate")
         try:
             tags = [value.decode("utf-8") for value in args[1:]]
         except UnicodeDecodeError as exc:
             raise RespCommandError("tags must be valid UTF-8") from exc
         return self.server.engine.invalidate_tags(tags)
+
+    def _authorize(self, permission: str, keys: Iterable[str] = ()) -> None:
+        assert self.principal is not None
+        if not self.principal.allows(permission, keys):
+            raise RespCommandError(
+                "NOPERM this user has no permissions to run the command"
+            )
 
     @staticmethod
     def _require_arity(args: Sequence[bytes], expected: int) -> None:
