@@ -101,6 +101,7 @@ restrict `/metrics` at the network or reverse-proxy layer when necessary.
 
 ## Documentation
 
+- [Command reference](docs/commands.md)
 - [HTTP API](docs/api.md)
 - [Architecture and guarantees](docs/architecture.md)
 - [Operations and deployment](docs/operations.md)
