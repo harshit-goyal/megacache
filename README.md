@@ -6,7 +6,8 @@ MegaCache is a correctness-aware, in-memory cache for database-backed APIs and
 internal services. It provides the primitives applications usually have to
 build around Redis or Memcached themselves: stale reads, request coalescing,
 lease-protected refreshes, tag invalidation, bounded memory, and useful
-operational metrics.
+operational metrics. Clients can use either Redis-compatible RESP2 commands or
+the HTTP API.
 
 > MegaCache is an alpha release. This version stores data in one process and is
 > intended for evaluation, development, and single-node deployments.
@@ -23,8 +24,9 @@ related keys stale. MegaCache makes the safe path explicit:
 - **Singleflight loading** coalesces concurrent in-process misses.
 - **Tag invalidation** expires related records without key scans.
 - **Bounded LRU storage** prevents unbounded process growth.
-- **Bearer authentication**, body limits, health endpoints, and Prometheus
-  metrics provide a secure operational baseline.
+- **RESP2 compatibility** supports common Redis clients and `redis-cli`.
+- **Authentication**, request limits, health endpoints, and Prometheus metrics
+  provide a secure operational baseline.
 - **Zero runtime dependencies** keeps deployment and auditing simple.
 
 ## Quick start
@@ -36,7 +38,28 @@ make test
 make run
 ```
 
-MegaCache listens on `http://localhost:8080`.
+MegaCache listens for RESP2 on port `6380` and HTTP on port `8080`.
+
+Use familiar Redis commands:
+
+```bash
+redis-cli -p 6380 SET product:123 '{"id":123,"name":"Desk"}' EX 300
+redis-cli -p 6380 GET product:123
+redis-cli -p 6380 TTL product:123
+redis-cli -p 6380 DEL product:123
+```
+
+Use MegaCache extensions for stale windows, refresh leases, and tag
+invalidation:
+
+```bash
+redis-cli -p 6380 MC.SET product:123 '{"id":123}' \
+  TTL 300 STALE 900 TAGS 2 product:123 catalog
+redis-cli -p 6380 MC.LEASE product:123
+redis-cli -p 6380 MC.INVALIDATE catalog
+```
+
+The HTTP API is also available:
 
 ```bash
 # Store a value for 5 minutes, retain it as stale for another 15 minutes.
@@ -88,6 +111,8 @@ This prevents a cache stampede without trusting a client-side distributed lock.
 |---|---:|---|
 | `MEGACACHE_HOST` | `0.0.0.0` | Bind address |
 | `MEGACACHE_PORT` | `8080` | HTTP port |
+| `MEGACACHE_RESP_HOST` | `0.0.0.0` | RESP2 bind address |
+| `MEGACACHE_RESP_PORT` | `6380` | RESP2 port |
 | `MEGACACHE_MAX_ENTRIES` | `10000` | Maximum entries before LRU eviction |
 | `MEGACACHE_MAX_BODY_BYTES` | `1048576` | Maximum JSON request size |
 | `MEGACACHE_DEFAULT_TTL_SECONDS` | `300` | Default fresh duration |
@@ -102,6 +127,7 @@ restrict `/metrics` at the network or reverse-proxy layer when necessary.
 ## Documentation
 
 - [Command reference](docs/commands.md)
+- [RESP2 and Redis command reference](docs/resp.md)
 - [HTTP API](docs/api.md)
 - [Architecture and guarantees](docs/architecture.md)
 - [Operations and deployment](docs/operations.md)
@@ -112,6 +138,7 @@ restrict `/metrics` at the network or reverse-proxy layer when necessary.
 
 - Pluggable Valkey and Redis storage
 - Distributed tag indexes and refresh leases
+- Additional Redis command compatibility
 - Event-driven invalidation and database CDC connectors
 - Background revalidation and negative-cache policy
 - OpenTelemetry traces and language SDKs

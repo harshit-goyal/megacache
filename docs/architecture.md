@@ -2,10 +2,15 @@
 
 ## Components
 
-The HTTP server is a thin adapter over `CacheEngine`. The engine owns an
-ordered entry map, reverse tag index, lease table, flight table, and counters
-under one reentrant lock. This makes compound operations atomic within the
-process and keeps the implementation deterministic.
+The HTTP and RESP2 servers are protocol adapters over one shared `CacheEngine`.
+The engine owns an ordered entry map, reverse tag index, lease table, flight
+table, and counters under one reentrant lock. This makes compound operations
+atomic within the process and keeps behavior consistent across protocols.
+
+The HTTP server listens on port `8080`. The RESP2 server listens on port `6380`
+and accepts a documented subset of Redis commands plus `MC.*` extensions.
+RESP3, Redis Cluster, replication, Lua, transactions, and Redis data structures
+are outside the current compatibility scope.
 
 Each entry has two deadlines:
 
@@ -15,6 +20,10 @@ Each entry has two deadlines:
 
 The entry map is access ordered. Inserting beyond `max_entries` removes the
 least recently accessed entry and its tag-index references.
+
+Plain RESP `SET` creates a persistent entry, matching Redis expiration
+semantics, although it remains subject to LRU capacity eviction and process
+restart. `SET ... EX`, `EXPIRE`, and MegaCache `MC.SET` create deadlines.
 
 ## Stampede prevention
 
@@ -34,12 +43,14 @@ lease while followers receive a retry interval.
 - Engine methods are thread-safe.
 - Writes, deletes, tag-index updates, and LRU eviction are atomic in-process.
 - A valid lease allows one guarded refresh write per key.
-- Values are accepted and returned as JSON without type coercion.
+- RESP values are binary-safe bulk strings. HTTP values retain JSON types.
+- RESP reads of HTTP-created structured values return compact JSON.
+- HTTP reads of RESP-created binary values return a base64-marked object.
 - Loader failures are propagated and do not produce success-shaped entries.
 
 ## Explicit non-guarantees
 
-Version 0.1 is a single-process cache. It does not replicate data, persist
+Version 0.2 is a single-process cache. It does not replicate data, persist
 entries, coordinate multiple MegaCache nodes, encrypt transport, or enforce
 durability. Restarting the process empties the cache. Deploy one instance per
 isolated workload or put it behind a single-target service until a distributed

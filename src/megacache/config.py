@@ -20,6 +20,8 @@ def _positive_int(name: str, default: int) -> int:
 class Config:
     host: str
     port: int
+    resp_host: str
+    resp_port: int
     max_entries: int
     max_body_bytes: int
     default_ttl_seconds: int
@@ -32,6 +34,8 @@ class Config:
         return cls(
             host=os.getenv("MEGACACHE_HOST", "0.0.0.0"),
             port=_positive_int("MEGACACHE_PORT", 8080),
+            resp_host=os.getenv("MEGACACHE_RESP_HOST", "0.0.0.0"),
+            resp_port=_positive_int("MEGACACHE_RESP_PORT", 6380),
             max_entries=_positive_int("MEGACACHE_MAX_ENTRIES", 10_000),
             max_body_bytes=_positive_int("MEGACACHE_MAX_BODY_BYTES", 1_048_576),
             default_ttl_seconds=_positive_int(
@@ -43,4 +47,3 @@ class Config:
             lease_seconds=_positive_int("MEGACACHE_LEASE_SECONDS", 30),
             api_key=os.getenv("MEGACACHE_API_KEY") or None,
         )
-

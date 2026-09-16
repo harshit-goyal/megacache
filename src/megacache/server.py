@@ -1,5 +1,6 @@
 """Dependency-free HTTP API for MegaCache."""
 
+import base64
 import hmac
 import json
 import logging
@@ -165,9 +166,24 @@ class MegaCacheHandler(BaseHTTPRequestHandler):
     def _json(self, status: int, value: Any) -> None:
         self._send(
             status,
-            json.dumps(value, separators=(",", ":")).encode("utf-8"),
+            json.dumps(
+                self._json_compatible(value), separators=(",", ":")
+            ).encode("utf-8"),
             "application/json",
         )
+
+    @classmethod
+    def _json_compatible(cls, value: Any) -> Any:
+        if isinstance(value, bytes):
+            return {
+                "$binary": base64.b64encode(value).decode("ascii"),
+                "$encoding": "base64",
+            }
+        if isinstance(value, dict):
+            return {key: cls._json_compatible(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [cls._json_compatible(item) for item in value]
+        return value
 
     def _send(self, status: int, payload: bytes, content_type: str) -> None:
         self.send_response(status)

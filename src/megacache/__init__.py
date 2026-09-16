@@ -3,5 +3,4 @@
 from .engine import CacheEngine, CacheResult
 
 __all__ = ["CacheEngine", "CacheResult"]
-__version__ = "0.1.0"
-
+__version__ = "0.2.0"

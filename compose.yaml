@@ -3,9 +3,9 @@ services:
     build: .
     ports:
       - "8080:8080"
+      - "6380:6380"
     environment:
       MEGACACHE_MAX_ENTRIES: "10000"
       MEGACACHE_DEFAULT_TTL_SECONDS: "300"
       MEGACACHE_DEFAULT_STALE_SECONDS: "900"
     restart: unless-stopped
-

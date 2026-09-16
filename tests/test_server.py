@@ -14,6 +14,8 @@ class ServerTests(unittest.TestCase):
         config = Config(
             host="127.0.0.1",
             port=0,
+            resp_host="127.0.0.1",
+            resp_port=0,
             max_entries=100,
             max_body_bytes=10_000,
             default_ttl_seconds=60,

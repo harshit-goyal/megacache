@@ -6,6 +6,5 @@ COPY src ./src
 RUN pip install --no-cache-dir .
 
 USER 65532:65532
-EXPOSE 8080
+EXPOSE 8080 6380
 ENTRYPOINT ["megacache"]
-

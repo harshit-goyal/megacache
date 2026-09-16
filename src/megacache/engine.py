@@ -1,5 +1,6 @@
 """Thread-safe cache engine with stale reads, tags, leases, and singleflight."""
 
+import math
 import secrets
 import threading
 import time
@@ -82,12 +83,22 @@ class CacheEngine:
         stale_seconds: Optional[int] = None,
         tags: Iterable[str] = (),
         lease_token: Optional[str] = None,
+        persistent: bool = False,
     ) -> CacheResult:
         self._validate_key(key)
-        ttl = self._duration(ttl_seconds, self._default_ttl, "ttl_seconds")
-        stale = self._duration(
-            stale_seconds, self._default_stale, "stale_seconds"
-        )
+        if persistent:
+            if ttl_seconds is not None or stale_seconds is not None:
+                raise ValueError("persistent entries cannot have expiration windows")
+            ttl = math.inf
+            stale = 0
+        else:
+            ttl = self._duration(ttl_seconds, self._default_ttl, "ttl_seconds")
+            stale = self._duration(
+                stale_seconds,
+                self._default_stale,
+                "stale_seconds",
+                allow_zero=True,
+            )
         normalized_tags = frozenset(self._normalize_tags(tags))
         now = self._clock()
 
@@ -114,6 +125,19 @@ class CacheEngine:
             self._evict_if_needed()
             return self._lookup(key, count=False)
 
+    def mget(self, keys: Iterable[str]) -> Tuple[CacheResult, ...]:
+        normalized = tuple(keys)
+        with self._lock:
+            return tuple(self.get(key) for key in normalized)
+
+    def mset(self, values: Iterable[Tuple[str, Any]]) -> None:
+        normalized = tuple(values)
+        for key, _ in normalized:
+            self._validate_key(key)
+        with self._lock:
+            for key, value in normalized:
+                self.put(key, value, persistent=True)
+
     def delete(self, key: str) -> bool:
         self._validate_key(key)
         with self._lock:
@@ -122,6 +146,58 @@ class CacheEngine:
             if existed:
                 self._metrics["deletes_total"] += 1
             return existed
+
+    def delete_many(self, keys: Iterable[str]) -> int:
+        normalized = tuple(keys)
+        with self._lock:
+            return sum(1 for key in normalized if self.delete(key))
+
+    def exists(self, keys: Iterable[str]) -> int:
+        normalized = tuple(keys)
+        with self._lock:
+            return sum(
+                1
+                for key in normalized
+                if self._lookup(key, count=False).state != "miss"
+            )
+
+    def expire(self, key: str, ttl_seconds: int) -> bool:
+        self._validate_key(key)
+        ttl = self._duration(ttl_seconds, 0, "ttl_seconds")
+        with self._lock:
+            if self._lookup(key, count=False).state == "miss":
+                return False
+            entry = self._entries[key]
+            deadline = self._clock() + ttl
+            entry.fresh_until = deadline
+            entry.stale_until = deadline
+            self._metrics["expirations_set_total"] += 1
+            return True
+
+    def ttl(self, key: str) -> int:
+        self._validate_key(key)
+        with self._lock:
+            if self._lookup(key, count=False).state == "miss":
+                return -2
+            deadline = self._entries[key].fresh_until
+            if math.isinf(deadline):
+                return -1
+            return max(0, int(deadline - self._clock()))
+
+    def flush(self) -> int:
+        with self._lock:
+            removed = len(self._entries)
+            self._entries.clear()
+            self._tags.clear()
+            self._leases.clear()
+            self._metrics["flushes_total"] += 1
+            return removed
+
+    def size(self) -> int:
+        with self._lock:
+            for key in tuple(self._entries):
+                self._lookup(key, count=False)
+            return len(self._entries)
 
     def invalidate_tags(self, tags: Iterable[str]) -> int:
         normalized = self._normalize_tags(tags)
@@ -218,7 +294,7 @@ class CacheEngine:
     def stats(self) -> Dict[str, int]:
         with self._lock:
             snapshot = dict(self._metrics)
-            snapshot["entries"] = len(self._entries)
+            snapshot["entries"] = self.size()
             snapshot["tags"] = len(self._tags)
             snapshot["active_leases"] = sum(
                 1 for lease in self._leases.values() if lease.until > self._clock()
@@ -288,14 +364,22 @@ class CacheEngine:
 
     @staticmethod
     def _validate_key(key: str) -> None:
-        if not isinstance(key, str) or not key or len(key.encode("utf-8")) > 1024:
-            raise ValueError("key must contain between 1 and 1024 UTF-8 bytes")
+        if not isinstance(key, str) or not key or len(key) > 1024:
+            raise ValueError("key must contain between 1 and 1024 characters")
 
     @staticmethod
-    def _duration(value: Optional[int], default: int, name: str) -> int:
+    def _duration(
+        value: Optional[int], default: int, name: str, allow_zero: bool = False
+    ) -> int:
         selected = default if value is None else value
-        if not isinstance(selected, int) or isinstance(selected, bool) or selected <= 0:
-            raise ValueError("{} must be a positive integer".format(name))
+        minimum = 0 if allow_zero else 1
+        if (
+            not isinstance(selected, int)
+            or isinstance(selected, bool)
+            or selected < minimum
+        ):
+            qualifier = "non-negative" if allow_zero else "positive"
+            raise ValueError("{} must be a {} integer".format(name, qualifier))
         return selected
 
     @staticmethod

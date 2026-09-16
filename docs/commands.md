@@ -23,7 +23,8 @@ Equivalent command:
 PYTHONPATH=src python3 -m megacache
 ```
 
-The service starts at `http://localhost:8080`.
+The RESP2 service starts on `localhost:6380`; HTTP starts at
+`http://localhost:8080`.
 
 ## Configure
 
@@ -50,7 +51,54 @@ The examples below use this shell variable:
 ```bash
 export MEGACACHE_URL='http://localhost:8080'
 export MEGACACHE_API_KEY='replace-with-a-long-random-secret'
+export REDISCLI_AUTH="$MEGACACHE_API_KEY"
 ```
+
+## Redis-compatible commands
+
+Connect interactively:
+
+```bash
+redis-cli -h 127.0.0.1 -p 6380
+```
+
+Write, read, expire, and delete values:
+
+```bash
+redis-cli -p 6380 SET user:42 '{"name":"Ada"}'
+redis-cli -p 6380 GET user:42
+redis-cli -p 6380 EXPIRE user:42 300
+redis-cli -p 6380 TTL user:42
+redis-cli -p 6380 EXISTS user:42
+redis-cli -p 6380 DEL user:42
+```
+
+Write and read multiple values:
+
+```bash
+redis-cli -p 6380 MSET feature:a on feature:b off
+redis-cli -p 6380 MGET feature:a feature:b
+```
+
+Inspect or clear the cache:
+
+```bash
+redis-cli -p 6380 DBSIZE
+redis-cli -p 6380 INFO
+redis-cli -p 6380 FLUSHDB
+```
+
+Use freshness windows and tags:
+
+```bash
+redis-cli -p 6380 MC.SET product:123 '{"id":123}' \
+  TTL 300 STALE 900 TAGS 2 product:123 catalog
+redis-cli -p 6380 MC.LEASE product:123
+redis-cli -p 6380 MC.INVALIDATE catalog
+```
+
+See the [RESP2 reference](resp.md) for the supported command matrix,
+authentication, response formats, and compatibility boundaries.
 
 ## Run with Docker
 
@@ -218,6 +266,6 @@ python3 -m pip wheel --no-deps --wheel-dir dist .
 Install the generated wheel:
 
 ```bash
-python3 -m pip install dist/megacache-0.1.0-py3-none-any.whl
+python3 -m pip install dist/megacache-0.2.0-py3-none-any.whl
 megacache
 ```

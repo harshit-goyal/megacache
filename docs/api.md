@@ -1,5 +1,8 @@
 # HTTP API
 
+This document covers the HTTP protocol. For `redis-cli` and RESP2 clients, see
+the [RESP command reference](resp.md).
+
 All `/v1/*` endpoints require `Authorization: Bearer <key>` when
 `MEGACACHE_API_KEY` is configured. Keys are URL-path components and should be
 percent encoded.
@@ -9,6 +12,12 @@ percent encoded.
 ### `GET /v1/cache/{key}`
 
 Returns `200` for fresh or stale values and `404` for a miss.
+
+Values written as binary strings through RESP are represented over HTTP as:
+
+```json
+{"$binary": "AAEC", "$encoding": "base64"}
+```
 
 ```json
 {
@@ -24,7 +33,7 @@ Returns `200` for fresh or stale values and `404` for a miss.
 ### `PUT /v1/cache/{key}`
 
 Creates or replaces an entry. `value` is required and may contain any JSON
-value. Durations are positive integer seconds.
+value. `ttl_seconds` must be positive; `stale_seconds` may be zero.
 
 ```json
 {

@@ -16,8 +16,8 @@ disclosure after a fix is available.
 
 ## Deployment responsibilities
 
-MegaCache does not terminate TLS. Deploy it on a private network behind a TLS
-proxy, configure `MEGACACHE_API_KEY`, and restrict health and metrics endpoints
-with network policy. Cached values reside in process memory and must be treated
-according to their data classification.
-
+MegaCache does not terminate TLS. Deploy it on a private network behind HTTP
+and TCP TLS proxies, configure `MEGACACHE_API_KEY`, and restrict ports plus
+health and metrics endpoints with network policy. The same API key authenticates
+HTTP bearer requests and the RESP `AUTH` command. Cached values reside in
+process memory and must be treated according to their data classification.

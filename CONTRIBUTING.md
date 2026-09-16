@@ -10,8 +10,8 @@ Thank you for improving MegaCache.
 
 Code must support Python 3.9+, avoid unnecessary runtime dependencies, validate
 untrusted input, and preserve explicit error behavior. Add tests for fixes and
-new functionality.
+new functionality. RESP changes must remain binary-safe, include wire-level
+tests, and update `docs/resp.md`.
 
 Use GitHub's private vulnerability reporting instead of a public issue for
 security problems.
-
