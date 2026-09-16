@@ -64,3 +64,16 @@ clients use `AUTH username password`; both must run over TLS.
 Cached values reside in process memory and must be treated according to their
 data classification. Request logs intentionally exclude cache keys, values,
 authorization headers, passwords, and RESP arguments.
+
+## Cluster security boundary
+
+Version 0.5 provides an in-process cluster coordinator and no node-to-node
+network listener. Logical node IDs in `MEGACACHE_CLUSTER_NODES` are local
+configuration, not authenticated identities. Do not expose or build an
+unauthenticated RPC shim around `ClusterStorage`.
+
+A future inter-process transport must provide mutual authentication,
+encryption, replay protection, message and snapshot size enforcement, term and
+ring-version validation, and authorization for membership changes. Until then,
+all logical replicas share one process security boundary and fail together if
+that process is compromised or terminated.

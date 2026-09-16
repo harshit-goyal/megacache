@@ -24,7 +24,7 @@ Remaining validation before declaring the alpha production-ready still
 includes sustained load testing, fuzzing, external security review, and
 published performance envelopes.
 
-## Phase 2: distributed operation
+## Phase 2: distributed operation — coordinator complete in 0.5
 
 Deliverables:
 
@@ -38,12 +38,23 @@ Deliverables:
 - Online node addition, removal, draining, and rebalancing
 - Snapshot/bootstrap transfer with checksums and backpressure
 
+Version 0.5 implements these behaviors behind `StorageBackend` and
+`ClusterStorage` as a deterministic in-process coordinator. It includes
+versioned rings, logical membership failure detection, consistency profiles,
+fencing, distributed leases/tag invalidation, online rebalance plans, bounded
+snapshot transfer, observability, and native topology/status commands.
+
+Authenticated encrypted node RPC, discovery, and independent-process failure
+domains are intentionally not simulated and remain required before MegaCache
+can claim a multi-host distributed deployment.
+
 Acceptance criteria:
 
-- A three-node cluster survives one node loss without acknowledged-write loss
-  under quorum mode.
+- A three-logical-node coordinator survives one modeled node loss without
+  acknowledged-write loss under quorum mode.
 - Rebalancing does not expose partially transferred entries.
-- Network-partition behavior is deterministic and documented.
+- Missing-heartbeat behavior is deterministic and documented; real network
+  partitions are outside version 0.5 because there is no node RPC transport.
 - The CLI reports topology, ownership, replication lag, and degraded state.
 
 ## Phase 3: origin protection

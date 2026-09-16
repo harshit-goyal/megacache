@@ -10,8 +10,10 @@ from typing import Any, Dict, Optional
 from urllib.parse import unquote, urlsplit
 
 from .auth import AuthManager, Principal
+from .cluster import QuorumError
 from .config import Config
-from .engine import CacheEngine, CacheResult
+from .engine import CacheResult
+from .storage import StorageBackend
 from .transport import TLSRequestMixin
 
 LOG = logging.getLogger("megacache")
@@ -20,7 +22,7 @@ LOG = logging.getLogger("megacache")
 class MegaCacheServer(TLSRequestMixin, ThreadingHTTPServer):
     daemon_threads = False
 
-    def __init__(self, address: tuple, config: Config, engine: CacheEngine):
+    def __init__(self, address: tuple, config: Config, engine: StorageBackend):
         self.initialize_transport()
         super().__init__(address, MegaCacheHandler)
         self.config = config
@@ -49,8 +51,16 @@ class MegaCacheHandler(BaseHTTPRequestHandler):
             )
             return
         path = urlsplit(self.path).path
-        if path in ("/healthz", "/readyz"):
+        if path == "/healthz":
             self._json(200, {"status": "ok"})
+            return
+        if path == "/readyz":
+            status = getattr(self.server.engine, "status", None)
+            degraded = False if status is None else bool(status()["degraded"])
+            self._json(
+                503 if degraded else 200,
+                {"status": "degraded" if degraded else "ok"},
+            )
             return
         if path == "/metrics":
             payload = self.server.engine.prometheus_metrics().encode("utf-8")
@@ -68,6 +78,11 @@ class MegaCacheHandler(BaseHTTPRequestHandler):
             try:
                 result = self.server.engine.get(key)
                 self._result(result)
+            except QuorumError as exc:
+                self._json(
+                    503,
+                    {"error": "quorum_unavailable", "message": str(exc)},
+                )
             except ValueError as exc:
                 self._json(400, {"error": "invalid_request", "message": str(exc)})
             return
@@ -96,6 +111,11 @@ class MegaCacheHandler(BaseHTTPRequestHandler):
                 lease_token=body.get("lease_token"),
             )
             self._result(result, status=201)
+        except QuorumError as exc:
+            self._json(
+                503,
+                {"error": "quorum_unavailable", "message": str(exc)},
+            )
         except (ValueError, TypeError) as exc:
             self._json(400, {"error": "invalid_request", "message": str(exc)})
 
@@ -111,6 +131,11 @@ class MegaCacheHandler(BaseHTTPRequestHandler):
                 return
             try:
                 self._result(self.server.engine.acquire_lease(key))
+            except QuorumError as exc:
+                self._json(
+                    503,
+                    {"error": "quorum_unavailable", "message": str(exc)},
+                )
             except ValueError as exc:
                 self._json(400, {"error": "invalid_request", "message": str(exc)})
             return
@@ -123,6 +148,11 @@ class MegaCacheHandler(BaseHTTPRequestHandler):
                     raise ValueError("tags is required")
                 count = self.server.engine.invalidate_tags(body["tags"])
                 self._json(200, {"invalidated": count})
+            except QuorumError as exc:
+                self._json(
+                    503,
+                    {"error": "quorum_unavailable", "message": str(exc)},
+                )
             except (ValueError, TypeError) as exc:
                 self._json(400, {"error": "invalid_request", "message": str(exc)})
             return
@@ -141,6 +171,11 @@ class MegaCacheHandler(BaseHTTPRequestHandler):
         try:
             deleted = self.server.engine.delete(key)
             self._json(200 if deleted else 404, {"deleted": deleted})
+        except QuorumError as exc:
+            self._json(
+                503,
+                {"error": "quorum_unavailable", "message": str(exc)},
+            )
         except ValueError as exc:
             self._json(400, {"error": "invalid_request", "message": str(exc)})
 

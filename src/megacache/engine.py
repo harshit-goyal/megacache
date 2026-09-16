@@ -10,6 +10,8 @@ from collections import OrderedDict, defaultdict
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, FrozenSet, Iterable, Optional, Tuple
 
+from .storage import StorageEntry
+
 
 @dataclass(frozen=True)
 class CacheResult:
@@ -42,6 +44,29 @@ class _Flight:
         self.event = threading.Event()
         self.result: Optional[CacheResult] = None
         self.error: Optional[BaseException] = None
+
+
+@dataclass
+class _EngineCheckpoint:
+    entries: "OrderedDict[str, _Entry]"
+    used_bytes: int
+    lease_bytes: int
+    tags: Dict[str, set]
+    leases: Dict[str, _Lease]
+    metrics: Dict[str, int]
+
+
+@dataclass
+class _MutationCheckpoint:
+    key: str
+    entry: Optional[_Entry]
+    predecessor: Optional[str]
+    lease: Optional[_Lease]
+    used_bytes: int
+    lease_bytes: int
+    metrics: Dict[str, int]
+    evicted_entries: list
+    evicted_keys: set
 
 
 class CacheEngine:
@@ -98,6 +123,7 @@ class CacheEngine:
             5.0,
         )
         self._lock = threading.RLock()
+        self._active_mutation: Optional[_MutationCheckpoint] = None
 
     def get(self, key: str) -> CacheResult:
         self._validate_key(key)
@@ -114,35 +140,21 @@ class CacheEngine:
         lease_token: Optional[str] = None,
         persistent: bool = False,
     ) -> CacheResult:
-        self._validate_key(key)
-        if persistent:
-            if ttl_seconds is not None or stale_seconds is not None:
-                raise ValueError("persistent entries cannot have expiration windows")
-            ttl = math.inf
-            stale = 0
-        else:
-            ttl = self._duration(ttl_seconds, self._default_ttl, "ttl_seconds")
-            stale = self._duration(
-                stale_seconds,
-                self._default_stale,
-                "stale_seconds",
-                allow_zero=True,
-            )
-        normalized_tags = frozenset(self._normalize_tags(tags))
-        stored_value = self._snapshot_value(value)
-        size_bytes = self._entry_size(key, stored_value, normalized_tags)
-        if size_bytes > self._max_entry_bytes:
-            with self._lock:
-                self._metrics["rejected_entries_total"] += 1
-            raise ValueError(
-                "entry requires {} bytes; maximum is {}".format(
-                    size_bytes, self._max_entry_bytes
-                )
-            )
-        if size_bytes > self._max_memory_bytes:
-            with self._lock:
-                self._metrics["rejected_entries_total"] += 1
-            raise ValueError("entry exceeds total cache memory limit")
+        (
+            stored_value,
+            ttl,
+            stale,
+            normalized_tags,
+            size_bytes,
+        ) = self._prepare_put(
+            key,
+            value,
+            ttl_seconds,
+            stale_seconds,
+            tags,
+            persistent,
+            count_rejection=True,
+        )
         now = self._clock()
 
         with self._lock:
@@ -177,6 +189,41 @@ class CacheEngine:
             self._metrics["writes_total"] += 1
             self._evict_if_needed()
             return self._lookup(key, count=False)
+
+    def validate_put(
+        self,
+        key: str,
+        value: Any,
+        ttl_seconds: Optional[int] = None,
+        stale_seconds: Optional[int] = None,
+        tags: Iterable[str] = (),
+        lease_token: Optional[str] = None,
+        persistent: bool = False,
+    ) -> None:
+        """Validate a write's deterministic admission checks without mutation."""
+        _, _, _, _, size_bytes = self._prepare_put(
+            key,
+            value,
+            ttl_seconds,
+            stale_seconds,
+            tags,
+            persistent,
+            count_rejection=False,
+        )
+        now = self._clock()
+        with self._lock:
+            if lease_token is not None:
+                lease = self._leases.get(key)
+                if lease is None or lease.until <= now:
+                    raise ValueError("lease is missing or expired")
+                if not secrets.compare_digest(lease.token, lease_token):
+                    raise ValueError("lease token does not match")
+            existing_lease = self._leases.get(key)
+            reserved_bytes = self._lease_bytes - (
+                0 if existing_lease is None else existing_lease.size_bytes
+            )
+            if size_bytes + reserved_bytes > self._max_memory_bytes:
+                raise ValueError("entry exceeds available cache memory")
 
     def mget(self, keys: Iterable[str]) -> Tuple[CacheResult, ...]:
         normalized = tuple(keys)
@@ -279,6 +326,228 @@ class CacheEngine:
             for key in tuple(self._entries):
                 self._lookup(key, count=False)
             return len(self._entries)
+
+    def keys(self) -> Tuple[str, ...]:
+        """Return live keys without changing their LRU order."""
+        with self._lock:
+            now = self._clock()
+            for key, entry in tuple(self._entries.items()):
+                if now >= entry.stale_until:
+                    self._remove_entry(key)
+            return tuple(self._entries)
+
+    def export_entries(
+        self, keys: Optional[Iterable[str]] = None
+    ) -> Tuple[StorageEntry, ...]:
+        """Export live entries with remaining freshness windows."""
+        with self._lock:
+            now = self._clock()
+            selected = tuple(self._entries) if keys is None else tuple(keys)
+            exported = []
+            for key in selected:
+                entry = self._entries.get(key)
+                if entry is None:
+                    continue
+                if now >= entry.stale_until:
+                    self._remove_entry(key)
+                    continue
+                persistent = math.isinf(entry.fresh_until)
+                exported.append(
+                    StorageEntry(
+                        key=key,
+                        value=self._copy_value(entry.value),
+                        fresh_for_seconds=(
+                            None
+                            if persistent
+                            else max(0.0, entry.fresh_until - now)
+                        ),
+                        stale_for_seconds=(
+                            None
+                            if persistent
+                            else max(
+                                0.0,
+                                entry.stale_until - max(now, entry.fresh_until),
+                            )
+                        ),
+                        tags=tuple(sorted(entry.tags)),
+                        persistent=persistent,
+                    )
+                )
+            return tuple(exported)
+
+    def restore_entries(self, entries: Iterable[StorageEntry]) -> int:
+        """Atomically restore a validated snapshot into local storage."""
+        prepared = self._prepare_restore_entries(entries)
+
+        with self._lock:
+            self._purge_expired_entries(self._clock())
+            self._validate_prepared_restore_capacity(prepared)
+            old_entries = self._entries.copy()
+            old_tags = defaultdict(
+                set,
+                ((tag, set(keys)) for tag, keys in self._tags.items()),
+            )
+            old_used_bytes = self._used_bytes
+            old_metrics = self._metrics.copy()
+            try:
+                now = self._clock()
+                for (
+                    key,
+                    value,
+                    tags,
+                    size_bytes,
+                    fresh_for,
+                    stale_for,
+                ) in prepared:
+                    self._remove_entry(key)
+                    if fresh_for is None:
+                        fresh_until = math.inf
+                        stale_until = math.inf
+                    else:
+                        fresh_until = now + fresh_for
+                        stale_until = fresh_until + stale_for
+                    self._entries[key] = _Entry(
+                        value=value,
+                        fresh_until=fresh_until,
+                        stale_until=stale_until,
+                        tags=tags,
+                        size_bytes=size_bytes,
+                    )
+                    self._used_bytes += size_bytes
+                    for tag in tags:
+                        self._tags[tag].add(key)
+            except BaseException:
+                self._entries = old_entries
+                self._tags = old_tags
+                self._used_bytes = old_used_bytes
+                self._metrics = old_metrics
+                raise
+            return len(prepared)
+
+    def validate_restore_entries(
+        self, entries: Iterable[StorageEntry]
+    ) -> None:
+        """Validate an atomic restore without changing cache state."""
+        prepared = self._prepare_restore_entries(entries)
+        with self._lock:
+            self._purge_expired_entries(self._clock())
+            self._validate_prepared_restore_capacity(prepared)
+
+    def begin_mutation_checkpoint(self, key: str) -> _MutationCheckpoint:
+        """Start a targeted single-key rollback journal.
+
+        The engine lock remains held until the checkpoint is committed or
+        restored, so concurrent direct users cannot interleave mutations.
+        """
+        self._validate_key(key)
+        self._lock.acquire()
+        try:
+            if self._active_mutation is not None:
+                raise RuntimeError("a cache mutation checkpoint is already active")
+            predecessor = None
+            for existing_key in self._entries:
+                if existing_key == key:
+                    break
+                predecessor = existing_key
+            checkpoint = _MutationCheckpoint(
+                key=key,
+                entry=copy.deepcopy(self._entries.get(key)),
+                predecessor=predecessor,
+                lease=copy.deepcopy(self._leases.get(key)),
+                used_bytes=self._used_bytes,
+                lease_bytes=self._lease_bytes,
+                metrics=dict(self._metrics),
+                evicted_entries=[],
+                evicted_keys=set(),
+            )
+            self._active_mutation = checkpoint
+            return checkpoint
+        except BaseException:
+            self._lock.release()
+            raise
+
+    def commit_mutation_checkpoint(
+        self, checkpoint: _MutationCheckpoint
+    ) -> None:
+        """Commit a targeted mutation and release its journal."""
+        self._validate_active_mutation(checkpoint)
+        self._active_mutation = None
+        self._lock.release()
+
+    def restore_mutation_checkpoint(
+        self, checkpoint: _MutationCheckpoint
+    ) -> None:
+        """Restore one mutation, including LRU, evictions, leases and metrics."""
+        self._validate_active_mutation(checkpoint)
+        try:
+            self._active_mutation = None
+            self._remove_entry(checkpoint.key)
+            self._remove_lease(checkpoint.key)
+            for evicted_key, evicted_entry in reversed(
+                checkpoint.evicted_entries
+            ):
+                self._remove_entry(evicted_key)
+                restored = copy.deepcopy(evicted_entry)
+                self._entries[evicted_key] = restored
+                self._entries.move_to_end(evicted_key, last=False)
+                for tag in restored.tags:
+                    self._tags[tag].add(evicted_key)
+            if checkpoint.entry is not None:
+                restored = copy.deepcopy(checkpoint.entry)
+                if checkpoint.predecessor is None:
+                    self._entries[checkpoint.key] = restored
+                    self._entries.move_to_end(checkpoint.key, last=False)
+                else:
+                    tail = []
+                    while self._entries:
+                        tail_key, tail_entry = self._entries.popitem(last=True)
+                        if tail_key == checkpoint.predecessor:
+                            self._entries[tail_key] = tail_entry
+                            break
+                        tail.append((tail_key, tail_entry))
+                    self._entries[checkpoint.key] = restored
+                    for tail_key, tail_entry in reversed(tail):
+                        self._entries[tail_key] = tail_entry
+                for tag in restored.tags:
+                    self._tags[tag].add(checkpoint.key)
+            if checkpoint.lease is not None:
+                self._leases[checkpoint.key] = copy.deepcopy(checkpoint.lease)
+            self._used_bytes = checkpoint.used_bytes
+            self._lease_bytes = checkpoint.lease_bytes
+            self._metrics = defaultdict(int, checkpoint.metrics)
+        finally:
+            self._active_mutation = None
+            self._lock.release()
+
+    def checkpoint(self) -> _EngineCheckpoint:
+        """Capture exact mutable storage state for coordinator rollback."""
+        with self._lock:
+            return _EngineCheckpoint(
+                entries=copy.deepcopy(self._entries),
+                used_bytes=self._used_bytes,
+                lease_bytes=self._lease_bytes,
+                tags={tag: set(keys) for tag, keys in self._tags.items()},
+                leases=copy.deepcopy(self._leases),
+                metrics=dict(self._metrics),
+            )
+
+    def restore_checkpoint(self, checkpoint: _EngineCheckpoint) -> None:
+        """Restore a checkpoint without producing cache operation side effects."""
+        if not isinstance(checkpoint, _EngineCheckpoint):
+            raise ValueError("invalid cache checkpoint")
+        with self._lock:
+            self._entries = copy.deepcopy(checkpoint.entries)
+            self._used_bytes = checkpoint.used_bytes
+            self._lease_bytes = checkpoint.lease_bytes
+            self._tags = defaultdict(
+                set,
+                (
+                    (tag, set(keys))
+                    for tag, keys in checkpoint.tags.items()
+                ),
+            )
+            self._leases = copy.deepcopy(checkpoint.leases)
+            self._metrics = defaultdict(int, checkpoint.metrics)
 
     def invalidate_tags(self, tags: Iterable[str]) -> int:
         normalized = self._normalize_tags(tags)
@@ -547,6 +816,14 @@ class CacheEngine:
         entry = self._entries.pop(key, None)
         if entry is None:
             return False
+        mutation = self._active_mutation
+        if (
+            mutation is not None
+            and key != mutation.key
+            and key not in mutation.evicted_keys
+        ):
+            mutation.evicted_entries.append((key, copy.deepcopy(entry)))
+            mutation.evicted_keys.add(key)
         self._used_bytes -= entry.size_bytes
         for tag in entry.tags:
             keys = self._tags.get(tag)
@@ -556,6 +833,20 @@ class CacheEngine:
                     self._tags.pop(tag, None)
         return True
 
+    def _purge_expired_entries(self, now: float) -> None:
+        for key, entry in tuple(self._entries.items()):
+            if now >= entry.stale_until:
+                self._remove_entry(key)
+
+    def _validate_active_mutation(
+        self, checkpoint: _MutationCheckpoint
+    ) -> None:
+        if (
+            not isinstance(checkpoint, _MutationCheckpoint)
+            or self._active_mutation is not checkpoint
+        ):
+            raise ValueError("invalid cache mutation checkpoint")
+
     def _evict_if_needed(self) -> None:
         while (
             len(self._entries) > self._max_entries
@@ -564,6 +855,111 @@ class CacheEngine:
             key = next(iter(self._entries))
             self._remove_entry(key)
             self._metrics["evictions_total"] += 1
+
+    def _prepare_put(
+        self,
+        key: str,
+        value: Any,
+        ttl_seconds: Optional[int],
+        stale_seconds: Optional[int],
+        tags: Iterable[str],
+        persistent: bool,
+        count_rejection: bool,
+    ) -> Tuple[Any, float, int, FrozenSet[str], int]:
+        self._validate_key(key)
+        if persistent:
+            if ttl_seconds is not None or stale_seconds is not None:
+                raise ValueError(
+                    "persistent entries cannot have expiration windows"
+                )
+            ttl = math.inf
+            stale = 0
+        else:
+            ttl = self._duration(
+                ttl_seconds, self._default_ttl, "ttl_seconds"
+            )
+            stale = self._duration(
+                stale_seconds,
+                self._default_stale,
+                "stale_seconds",
+                allow_zero=True,
+            )
+        normalized_tags = frozenset(self._normalize_tags(tags))
+        stored_value = self._snapshot_value(value)
+        size_bytes = self._entry_size(key, stored_value, normalized_tags)
+        if size_bytes > self._max_entry_bytes:
+            if count_rejection:
+                with self._lock:
+                    self._metrics["rejected_entries_total"] += 1
+            raise ValueError(
+                "entry requires {} bytes; maximum is {}".format(
+                    size_bytes, self._max_entry_bytes
+                )
+            )
+        if size_bytes > self._max_memory_bytes:
+            if count_rejection:
+                with self._lock:
+                    self._metrics["rejected_entries_total"] += 1
+            raise ValueError("entry exceeds total cache memory limit")
+        return stored_value, ttl, stale, normalized_tags, size_bytes
+
+    def _prepare_restore_entries(
+        self, entries: Iterable[StorageEntry]
+    ) -> list:
+        normalized = tuple(entries)
+        for item in normalized:
+            if not isinstance(item, StorageEntry):
+                raise ValueError("snapshot entries must be StorageEntry values")
+            self._validate_key(item.key)
+        if len({item.key for item in normalized}) != len(normalized):
+            raise ValueError("snapshot contains duplicate keys")
+        prepared = []
+        for item in normalized:
+            tags = frozenset(self._normalize_tags(item.tags))
+            value = self._snapshot_value(item.value)
+            if item.persistent:
+                fresh_for = None
+                stale_for = None
+            else:
+                fresh_for = self._snapshot_duration(
+                    item.fresh_for_seconds, "fresh_for_seconds"
+                )
+                stale_for = self._snapshot_duration(
+                    item.stale_for_seconds, "stale_for_seconds"
+                )
+                if fresh_for + stale_for <= 0:
+                    continue
+            size_bytes = self._entry_size(item.key, value, tags)
+            if (
+                size_bytes > self._max_entry_bytes
+                or size_bytes > self._max_memory_bytes
+            ):
+                raise ValueError("snapshot entry exceeds configured limits")
+            prepared.append(
+                (item.key, value, tags, size_bytes, fresh_for, stale_for)
+            )
+        return prepared
+
+    def _validate_prepared_restore_capacity(self, prepared: list) -> None:
+        replaced_bytes = sum(
+            self._entries[key].size_bytes
+            for key, *_ in prepared
+            if key in self._entries
+        )
+        replaced_count = sum(
+            1 for key, *_ in prepared if key in self._entries
+        )
+        final_count = len(self._entries) - replaced_count + len(prepared)
+        final_bytes = (
+            self._used_bytes
+            - replaced_bytes
+            + sum(item[3] for item in prepared)
+        )
+        if (
+            final_count > self._max_entries
+            or final_bytes > self._max_memory_bytes
+        ):
+            raise ValueError("snapshot exceeds available cache capacity")
 
     @staticmethod
     def _entry_size(key: str, value: Any, tags: FrozenSet[str]) -> int:
@@ -626,6 +1022,18 @@ class CacheEngine:
             qualifier = "non-negative" if allow_zero else "positive"
             raise ValueError("{} must be a {} integer".format(name, qualifier))
         return selected
+
+    @staticmethod
+    def _snapshot_duration(value: Optional[float], name: str) -> float:
+        if (
+            value is None
+            or isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or value < 0
+        ):
+            raise ValueError("{} must be a finite non-negative number".format(name))
+        return float(value)
 
     @staticmethod
     def _normalize_tags(tags: Iterable[str]) -> Tuple[str, ...]:

@@ -9,7 +9,8 @@ from typing import Any, Iterable, List, Optional, Sequence, Tuple
 
 from .auth import AuthManager, Principal
 from .config import Config
-from .engine import CacheEngine, CacheResult
+from .engine import CacheResult
+from .storage import StorageBackend
 from .transport import TLSRequestMixin
 
 LOG = logging.getLogger("megacache.resp")
@@ -31,7 +32,7 @@ class MegaCacheRespServer(TLSRequestMixin, socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = False
 
-    def __init__(self, address: tuple, config: Config, engine: CacheEngine):
+    def __init__(self, address: tuple, config: Config, engine: StorageBackend):
         self.initialize_transport()
         self.config = config
         self.engine = engine
@@ -131,6 +132,8 @@ class MegaCacheRespHandler(socketserver.StreamRequestHandler):
             "MC.SET",
             "MC.LEASE",
             "MC.INVALIDATE",
+            "MC.TOPOLOGY",
+            "MC.STATUS",
         }
         return command if command in supported else "UNKNOWN"
 
@@ -210,6 +213,8 @@ class MegaCacheRespHandler(socketserver.StreamRequestHandler):
             "MC.SET": self._mc_set,
             "MC.LEASE": self._mc_lease,
             "MC.INVALIDATE": self._mc_invalidate,
+            "MC.TOPOLOGY": self._mc_topology,
+            "MC.STATUS": self._mc_status,
         }
         if command == "QUIT":
             self._require_arity(args, 1)
@@ -366,7 +371,7 @@ class MegaCacheRespHandler(socketserver.StreamRequestHandler):
         lines = [
             "# Server",
             "redis_version:7.2.0",
-            "megacache_version:0.4.0",
+            "megacache_version:0.5.0",
             "redis_mode:standalone",
             "# Keyspace",
             "db0:keys={}".format(self.server.engine.size()),
@@ -404,7 +409,7 @@ class MegaCacheRespHandler(socketserver.StreamRequestHandler):
             b"server",
             b"megacache",
             b"version",
-            b"0.4.0",
+            b"0.5.0",
             b"proto",
             2,
             b"mode",
@@ -500,6 +505,52 @@ class MegaCacheRespHandler(socketserver.StreamRequestHandler):
         except UnicodeDecodeError as exc:
             raise RespCommandError("tags must be valid UTF-8") from exc
         return self.server.engine.invalidate_tags(tags)
+
+    def _mc_topology(self, args: Sequence[bytes]) -> bytes:
+        if len(args) not in (1, 2):
+            raise RespCommandError(
+                "wrong number of arguments for 'mc.topology' command"
+            )
+        self._authorize("admin")
+        if len(args) == 2:
+            key = self._key(args[1])
+            ownership = getattr(self.server.engine, "ownership", None)
+            if ownership is None:
+                value = {
+                    "key": key,
+                    "ring_version": 0,
+                    "primary": "standalone",
+                    "replicas": ["standalone"],
+                }
+            else:
+                value = ownership(key)
+        else:
+            topology = getattr(self.server.engine, "topology", None)
+            if topology is None:
+                value = {
+                    "mode": "standalone",
+                    "degraded": False,
+                    "nodes": [{"node_id": "standalone", "status": "active"}],
+                }
+            else:
+                value = topology()
+        return json.dumps(value, separators=(",", ":")).encode("utf-8")
+
+    def _mc_status(self, args: Sequence[bytes]) -> bytes:
+        self._require_arity(args, 1)
+        self._authorize("admin")
+        status = getattr(self.server.engine, "status", None)
+        value = (
+            {
+                "healthy_nodes": 1,
+                "total_nodes": 1,
+                "degraded": False,
+                "known_keys": self.server.engine.size(),
+            }
+            if status is None
+            else status()
+        )
+        return json.dumps(value, separators=(",", ":")).encode("utf-8")
 
     def _authorize(self, permission: str, keys: Iterable[str] = ()) -> None:
         assert self.principal is not None

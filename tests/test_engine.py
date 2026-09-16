@@ -2,7 +2,7 @@ import threading
 import time
 import unittest
 
-from megacache import CacheEngine
+from megacache import CacheEngine, StorageEntry
 
 
 class FakeClock:
@@ -174,6 +174,47 @@ class CacheEngineTests(unittest.TestCase):
         cache.put("key", "value")
         clock.advance(61)
         self.assertEqual("stale", cache.get("key").state)
+
+    def test_restore_rejects_duplicate_keys_before_capacity_math(self):
+        cache = CacheEngine(max_entries=1, max_memory_bytes=1_000)
+        cache.put("existing", "stable")
+        duplicate = StorageEntry(
+            key="duplicate",
+            value="value",
+            fresh_for_seconds=None,
+            stale_for_seconds=None,
+            tags=(),
+            persistent=True,
+        )
+        before = cache.stats()
+        with self.assertRaisesRegex(ValueError, "duplicate keys"):
+            cache.restore_entries((duplicate, duplicate))
+        self.assertEqual("stable", cache.get("existing").value)
+        self.assertEqual(before["memory_bytes"], cache.stats()["memory_bytes"])
+
+    def test_restore_purges_expired_entries_before_capacity_validation(self):
+        clock = FakeClock()
+        cache = CacheEngine(
+            max_entries=1,
+            default_ttl_seconds=1,
+            default_stale_seconds=1,
+            clock=clock,
+            max_memory_bytes=1_000,
+        )
+        cache.put("expired", "old")
+        clock.advance(3)
+        replacement = StorageEntry(
+            key="replacement",
+            value="new",
+            fresh_for_seconds=None,
+            stale_for_seconds=None,
+            tags=(),
+            persistent=True,
+        )
+
+        self.assertEqual(1, cache.restore_entries((replacement,)))
+        self.assertEqual("miss", cache.get("expired").state)
+        self.assertEqual("new", cache.get("replacement").value)
 
 
 if __name__ == "__main__":

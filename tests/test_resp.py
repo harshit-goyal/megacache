@@ -181,6 +181,15 @@ class RespServerTests(unittest.TestCase):
         self.assertNotIn('operation="UNIQUE-A"', metrics)
         self.assertNotIn('operation="UNIQUE-B"', metrics)
 
+    def test_cluster_topology_commands_have_standalone_fallback(self):
+        self.authenticate()
+        topology = self.client.command("MC.TOPOLOGY")
+        self.assertIn(b'"mode":"standalone"', topology)
+        ownership = self.client.command("MC.TOPOLOGY", "key")
+        self.assertIn(b'"primary":"standalone"', ownership)
+        status = self.client.command("MC.STATUS")
+        self.assertIn(b'"healthy_nodes":1', status)
+
 
 if __name__ == "__main__":
     unittest.main()

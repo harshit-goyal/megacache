@@ -14,6 +14,7 @@ from typing import Any, List, Optional, Sequence
 
 from .auth import hash_password, write_example_users_file
 from .client import MegaCacheClient, MegaCacheClientError
+from .cluster import ClusterNode, ClusterStorage
 from .config import Config
 from .engine import CacheEngine
 from .observability import configure_logging
@@ -28,7 +29,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Run and interact with MegaCache.",
     )
     parser.add_argument(
-        "--version", action="version", version="MegaCache 0.4.0"
+        "--version", action="version", version="MegaCache 0.5.0"
     )
     parser.add_argument(
         "--host",
@@ -132,6 +133,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     commands.add_parser("dbsize", help="count live entries")
     commands.add_parser("info", help="show server information")
+    topology = commands.add_parser(
+        "topology", help="show cluster topology and ownership"
+    )
+    topology.add_argument(
+        "key", nargs="?", help="show owners for one cache key"
+    )
+    commands.add_parser(
+        "status", help="show cluster health and replication status"
+    )
 
     flush = commands.add_parser("flush", help="delete every cache entry")
     flush.add_argument(
@@ -240,6 +250,13 @@ def _execute(client: MegaCacheClient, args: argparse.Namespace) -> Any:
         return client.command("DBSIZE")
     if command == "info":
         return client.command("INFO")
+    if command == "topology":
+        parts = ["MC.TOPOLOGY"]
+        if args.key is not None:
+            parts.append(args.key)
+        return _decode_json_response(client.command(*parts))
+    if command == "status":
+        return _decode_json_response(client.command("MC.STATUS"))
     if command == "flush":
         return client.command("FLUSHDB")
     if command == "lease":
@@ -262,13 +279,33 @@ def _serve(args: argparse.Namespace) -> int:
     if getattr(args, "resp_port", None) is not None:
         config = replace(config, resp_port=args.resp_port)
 
-    engine = CacheEngine(
-        max_entries=config.max_entries,
-        max_memory_bytes=config.max_memory_bytes,
-        max_entry_bytes=config.max_entry_bytes,
-        default_ttl_seconds=config.default_ttl_seconds,
-        default_stale_seconds=config.default_stale_seconds,
+    nodes = [
+        ClusterNode(
+            node_id,
+            CacheEngine(
+                max_entries=config.max_entries,
+                max_memory_bytes=config.max_memory_bytes,
+                max_entry_bytes=config.max_entry_bytes,
+                default_ttl_seconds=config.default_ttl_seconds,
+                default_stale_seconds=config.default_stale_seconds,
+                lease_seconds=config.lease_seconds,
+            ),
+        )
+        for node_id in config.cluster_nodes
+    ]
+    engine = ClusterStorage(
+        nodes,
+        replica_count=config.replica_count,
+        virtual_nodes=config.virtual_nodes,
+        consistency=config.consistency,
+        heartbeat_timeout_seconds=config.heartbeat_timeout_seconds,
         lease_seconds=config.lease_seconds,
+        snapshot_payload_limit_bytes=config.snapshot_payload_limit_bytes,
+        snapshot_chunk_bytes=config.snapshot_chunk_bytes,
+        snapshot_max_in_flight=config.snapshot_max_in_flight,
+        max_leases=config.max_entries,
+        max_lease_memory_bytes=config.max_memory_bytes,
+        max_retained_tombstones=config.max_retained_tombstones,
     )
     http_server = MegaCacheServer((config.host, config.port), config, engine)
     resp_server = MegaCacheRespServer(
@@ -278,6 +315,15 @@ def _serve(args: argparse.Namespace) -> int:
     enable_server_tls(resp_server, config)
     resp_thread = threading.Thread(target=resp_server.serve_forever, daemon=True)
     resp_thread.start()
+    heartbeat_stopped = threading.Event()
+
+    def send_heartbeats() -> None:
+        while not heartbeat_stopped.wait(config.heartbeat_interval_seconds):
+            for node_id in config.cluster_nodes:
+                engine.heartbeat(node_id)
+
+    heartbeat_thread = threading.Thread(target=send_heartbeats, daemon=True)
+    heartbeat_thread.start()
     logger = logging.getLogger("megacache")
     logger.info("HTTP API listening on %s:%s", config.host, config.port)
     logger.info("RESP2 API listening on %s:%s", config.resp_host, config.resp_port)
@@ -291,6 +337,7 @@ def _serve(args: argparse.Namespace) -> int:
         if shutdown_started.is_set():
             return
         shutdown_started.set()
+        heartbeat_stopped.set()
         http_server.start_draining()
         resp_server.start_draining()
         http_server.shutdown()
@@ -331,6 +378,7 @@ def _serve(args: argparse.Namespace) -> int:
         shutdown_threads.append(shutdown_thread)
         shutdown_thread.start()
     finally:
+        heartbeat_stopped.set()
         if shutdown_threads:
             shutdown_threads[-1].join(
                 timeout=config.shutdown_grace_seconds + 5
@@ -340,6 +388,7 @@ def _serve(args: argparse.Namespace) -> int:
         http_server.server_close()
         resp_server.server_close()
         resp_thread.join(timeout=5)
+        heartbeat_thread.join(timeout=config.heartbeat_interval_seconds + 1)
         for signum, previous in previous_handlers.items():
             signal.signal(signum, previous)
     return 0
@@ -386,6 +435,9 @@ def _print_response(value: Any, as_json: bool) -> None:
             rendered = "(nil)" if item is None else _text_value(item)
             print("{}) {}".format(index, rendered))
         return
+    if isinstance(value, dict):
+        print(json.dumps(_json_value(value), indent=2, sort_keys=True))
+        return
     print(value)
 
 
@@ -407,3 +459,15 @@ def _json_value(value: Any) -> Any:
     if isinstance(value, list):
         return [_json_value(item) for item in value]
     return value
+
+
+def _decode_json_response(value: Any) -> Any:
+    if not isinstance(value, bytes):
+        raise ValueError("server returned an invalid topology response")
+    try:
+        decoded = json.loads(value.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("server returned invalid topology JSON") from exc
+    if not isinstance(decoded, dict):
+        raise ValueError("server returned invalid topology JSON")
+    return decoded

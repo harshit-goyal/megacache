@@ -9,8 +9,9 @@ lease-protected refreshes, tag invalidation, bounded memory, and useful
 operational metrics. Clients can use either Redis-compatible RESP2 commands or
 the HTTP API.
 
-> MegaCache is an alpha release. This version stores data in one process and is
-> intended for evaluation, development, and single-node deployments.
+> MegaCache is an alpha release. Version 0.5 adds a deterministic, testable
+> in-process cluster coordinator. It does not yet include authenticated
+> node-to-node RPC, so separately deployed processes do not form a cluster.
 
 ## Why MegaCache?
 
@@ -30,6 +31,12 @@ related keys stale. MegaCache makes the safe path explicit:
   and key prefixes.
 - **Structured logs and latency histograms** provide a production observability
   baseline.
+- **Versioned consistent hashing and replication** provide explicit `one`,
+  `majority`, and `all` consistency profiles across coordinator-managed nodes.
+- **Fenced leadership, membership heartbeats, and online rebalancing** make
+  logical node failure and topology changes deterministic.
+- **Checksummed snapshots with bounded chunks** bootstrap replicas without
+  publishing partially transferred ownership.
 - **Zero runtime dependencies** keeps deployment and auditing simple.
 
 ## Quick start
@@ -53,6 +60,9 @@ mc put product:123 '{"id":123,"name":"Desk"}' \
 mc get product:123
 mc ttl product:123
 mc invalidate catalog
+mc topology
+mc topology product:123
+mc status
 ```
 
 Redis clients remain supported through RESP2:
@@ -130,6 +140,17 @@ This prevents a cache stampede without trusting a client-side distributed lock.
 | `MEGACACHE_TLS_CERT_FILE` | unset | PEM certificate for HTTP and RESP TLS |
 | `MEGACACHE_TLS_KEY_FILE` | unset | PEM private key for HTTP and RESP TLS |
 | `MEGACACHE_LOG_FORMAT` | `json` | `json` or `text` server logs |
+| `MEGACACHE_NODE_ID` | system hostname | Stable identity of this process |
+| `MEGACACHE_CLUSTER_NODES` | local node ID | Comma-separated in-process node IDs |
+| `MEGACACHE_REPLICA_COUNT` | `1` | Desired replicas per key |
+| `MEGACACHE_VIRTUAL_NODES` | `128` | Consistent-hash points per node |
+| `MEGACACHE_CONSISTENCY` | `majority` | `one`, `majority`, or `all` |
+| `MEGACACHE_HEARTBEAT_INTERVAL_SECONDS` | `2` | Local heartbeat interval |
+| `MEGACACHE_HEARTBEAT_TIMEOUT_SECONDS` | `10` | Failure-detection timeout |
+| `MEGACACHE_SNAPSHOT_PAYLOAD_LIMIT_BYTES` | `67108864` | Maximum snapshot session payload |
+| `MEGACACHE_SNAPSHOT_CHUNK_BYTES` | `262144` | Maximum transfer chunk |
+| `MEGACACHE_SNAPSHOT_MAX_IN_FLIGHT` | `2` | Unacknowledged chunk limit |
+| `MEGACACHE_MAX_RETAINED_TOMBSTONES` | `10000` | Backpressure limit for deletes awaiting unavailable replicas |
 
 The native client also reads `MEGACACHE_CLI_HOST`,
 `MEGACACHE_CLI_PORT`, `MEGACACHE_CLI_USERNAME`,
@@ -155,9 +176,11 @@ reverse-proxy layer.
 
 ## Roadmap
 
-Phase 1 production foundations are available in version 0.4. Distributed
-operation, origin protection, freshness automation, SDKs, cache intelligence,
-and the managed control plane are specified in the
+Phase 1 production foundations are available in version 0.4. Version 0.5
+delivers the Phase 2 storage and in-process cluster coordination interfaces.
+Secure inter-process transport remains a documented boundary rather than a
+simulated guarantee. Origin protection, freshness automation, SDKs, cache
+intelligence, and the managed control plane remain on the
 [implementation roadmap](docs/roadmap.md).
 
 ## License

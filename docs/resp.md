@@ -129,12 +129,31 @@ MC.INVALIDATE tag [tag ...]
 
 The integer response is the number of deleted entries.
 
+### `MC.TOPOLOGY`
+
+Returns compact JSON describing the coordinator ring, leader term, nodes,
+ownership counts, replication lag, consistency profile, and degraded state:
+
+```text
+MC.TOPOLOGY
+MC.TOPOLOGY product:123
+```
+
+With a key argument, the response contains that key's primary and replica
+owners. Administrator permission is required.
+
+### `MC.STATUS`
+
+Returns compact JSON with logical node health, ring version, total replication
+lag, known key count, and degraded state. Administrator permission is required.
+
 ## Compatibility boundaries
 
-MegaCache currently supports RESP2 standalone string-cache workflows. It does
+MegaCache currently supports RESP2 string-cache workflows. It does
 not support RESP3, pipelined transaction guarantees, pub/sub, scripts,
 transactions, streams, hashes, lists, sets, sorted sets, persistence,
-replication, Sentinel, or Redis Cluster.
+Sentinel, or Redis Cluster. MegaCache's replication is internal to
+`ClusterStorage`; it does not implement Redis replication protocols.
 
 RESP keys are limited to 1024 bytes. HTTP keys are limited to 1024 characters.
 Each argument is limited by

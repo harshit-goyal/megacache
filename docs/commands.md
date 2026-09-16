@@ -141,7 +141,15 @@ Inspect the server:
 ```bash
 mc dbsize
 mc info
+mc topology
+mc topology product:123
+mc status
 ```
+
+`mc topology` reports the ring version and fingerprint, leader term, logical
+nodes, ownership counts, replica lag, configured consistency, and degraded
+state. Supplying a key reports its primary and replica owners. `mc status`
+returns a compact health summary. Both require administrator permission.
 
 Clear all entries only with explicit confirmation:
 
@@ -383,6 +391,6 @@ python3 -m pip wheel --no-deps --wheel-dir dist .
 Install the generated wheel:
 
 ```bash
-python3 -m pip install dist/megacache-0.4.0-py3-none-any.whl
+python3 -m pip install dist/megacache-0.5.0-py3-none-any.whl
 mc
 ```

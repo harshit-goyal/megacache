@@ -47,7 +47,10 @@ value. `ttl_seconds` must be positive; `stale_seconds` may be zero.
 }
 ```
 
-Returns `201`. A supplied lease must be current and match the key.
+Returns `201`. A supplied lease must be current and match the key. When the
+server uses `ClusterStorage`, completion also means the configured write
+consistency profile was satisfied; otherwise the request returns an
+`invalid_request` error describing the unavailable quorum.
 
 ### `DELETE /v1/cache/{key}`
 
@@ -72,7 +75,10 @@ Possible responses:
 
 ### `POST /v1/invalidate`
 
-Atomically removes every entry associated with at least one supplied tag.
+Removes every entry associated with at least one supplied tag. Local
+`CacheEngine` invalidation is atomic. Cluster invalidation preflights quorum for
+the complete matched key set and commits all versioned tombstones atomically;
+no matched key is removed when any key cannot satisfy quorum.
 
 ```json
 {"tags": ["tenant:42", "catalog"]}
@@ -83,7 +89,8 @@ Returns `{"invalidated": 12}`.
 ## Operations
 
 - `GET /healthz`: process liveness.
-- `GET /readyz`: readiness.
+- `GET /readyz`: readiness; returns `503` with `degraded` when the configured
+  cluster consistency profile cannot be met.
 - `GET /metrics`: Prometheus text exposition.
 - `GET /v1/stats`: JSON metric snapshot.
 

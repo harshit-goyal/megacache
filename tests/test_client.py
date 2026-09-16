@@ -125,7 +125,23 @@ class NativeClientTests(unittest.TestCase):
         with redirect_stdout(output), self.assertRaises(SystemExit) as exit_status:
             run(["--version"])
         self.assertEqual(0, exit_status.exception.code)
-        self.assertEqual("MegaCache 0.4.0", output.getvalue().strip())
+        self.assertEqual("MegaCache 0.5.0", output.getvalue().strip())
+
+    def test_native_cli_topology_and_status(self):
+        connection = [
+            "--port",
+            str(self.port),
+            "--password",
+            "secret",
+            "--json",
+        ]
+        for command in ("topology", "status"):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = run(connection + [command])
+            self.assertEqual(0, code)
+            document = __import__("json").loads(output.getvalue())
+            self.assertFalse(document["degraded"])
 
 
 if __name__ == "__main__":
