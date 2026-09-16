@@ -9,21 +9,29 @@ git clone https://github.com/harshit-goyal/megacache.git
 cd megacache
 ```
 
+Install the native command:
+
+```bash
+python3 -m pip install .
+megacache --help
+```
+
 ## Run locally
 
 MegaCache requires Python 3.9 or newer and has no runtime dependencies.
 
 ```bash
-make run
+megacache serve
 ```
 
 Equivalent command:
 
 ```bash
-PYTHONPATH=src python3 -m megacache
+make run
 ```
 
-The RESP2 service starts on `localhost:6380`; HTTP starts at
+Running `megacache` without a subcommand also starts the server for backward
+compatibility. The RESP2 service starts on `localhost:6380`; HTTP starts at
 `http://localhost:8080`.
 
 ## Configure
@@ -54,7 +62,91 @@ export MEGACACHE_API_KEY='replace-with-a-long-random-secret'
 export REDISCLI_AUTH="$MEGACACHE_API_KEY"
 ```
 
-## Redis-compatible commands
+## Native MegaCache commands
+
+Check connectivity:
+
+```bash
+megacache ping
+```
+
+Store a value with fresh and stale windows:
+
+```bash
+megacache put product:123 '{"id":123,"name":"Desk"}' \
+  --ttl 300 \
+  --stale 900 \
+  --tag product:123 \
+  --tag catalog
+```
+
+Read and delete:
+
+```bash
+megacache get product:123
+megacache delete product:123
+```
+
+Manage expiration:
+
+```bash
+megacache expire product:123 300
+megacache ttl product:123
+```
+
+Work with multiple keys:
+
+```bash
+megacache mset feature:a on feature:b off
+megacache mget feature:a feature:b
+megacache exists feature:a feature:b
+```
+
+Coordinate a refresh:
+
+```bash
+megacache lease product:123
+megacache put product:123 '{"id":123,"name":"Updated desk"}' \
+  --ttl 300 --stale 900 --lease TOKEN_FROM_LEASE
+```
+
+Invalidate related entries:
+
+```bash
+megacache invalidate catalog product:123
+```
+
+Inspect the server:
+
+```bash
+megacache dbsize
+megacache info
+```
+
+Clear all entries only with explicit confirmation:
+
+```bash
+megacache flush --yes
+```
+
+For automation, place `--json` before the subcommand:
+
+```bash
+megacache --json get product:123
+megacache --json lease product:123
+```
+
+Connection flags also precede the subcommand:
+
+```bash
+megacache --host cache.internal --port 6380 ping
+```
+
+The native command reads its password from `MEGACACHE_API_KEY`. The complete
+syntax is available through `megacache --help` and
+`megacache <command> --help`.
+
+## Redis CLI compatibility
 
 Connect interactively:
 
@@ -135,7 +227,7 @@ curl --fail "$MEGACACHE_URL/healthz"
 curl --fail "$MEGACACHE_URL/readyz"
 ```
 
-## Write a cache entry
+## HTTP: write a cache entry
 
 Keys are URL-path components and should be percent encoded. For example,
 `product:123` becomes `product%3A123`.
@@ -159,7 +251,7 @@ curl --fail-with-body \
 `ttl_seconds` controls the fresh window. `stale_seconds` controls how long the
 entry remains available as stale after the fresh window ends.
 
-## Read a cache entry
+## HTTP: read a cache entry
 
 ```bash
 curl --fail-with-body \
@@ -169,7 +261,7 @@ curl --fail-with-body \
 
 The response state is `fresh`, `stale`, or `miss`. A miss returns HTTP `404`.
 
-## Delete a cache entry
+## HTTP: delete a cache entry
 
 ```bash
 curl --fail-with-body \
@@ -177,7 +269,7 @@ curl --fail-with-body \
   --header "Authorization: Bearer $MEGACACHE_API_KEY"
 ```
 
-## Invalidate entries by tag
+## HTTP: invalidate entries by tag
 
 This removes every entry associated with either supplied tag:
 
@@ -189,7 +281,7 @@ curl --fail-with-body \
   --data '{"tags":["product:123","catalog"]}'
 ```
 
-## Refresh a value without a cache stampede
+## HTTP: refresh a value without a cache stampede
 
 Request a refresh lease:
 
@@ -266,6 +358,6 @@ python3 -m pip wheel --no-deps --wheel-dir dist .
 Install the generated wheel:
 
 ```bash
-python3 -m pip install dist/megacache-0.2.0-py3-none-any.whl
+python3 -m pip install dist/megacache-0.3.0-py3-none-any.whl
 megacache
 ```

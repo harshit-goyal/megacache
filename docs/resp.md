@@ -2,7 +2,9 @@
 
 MegaCache exposes a RESP2 TCP server on port `6380`. It works with `redis-cli`
 and clients that only require the supported command subset. It is not a
-complete Redis implementation.
+complete Redis implementation. Most users should use the native
+[`megacache` commands](commands.md); `redis-cli` exists for compatibility and
+migration.
 
 ## Connect
 

@@ -7,7 +7,8 @@ Run MegaCache on a private network behind a TLS-terminating reverse proxy. Set
 container filesystem, and allocate enough memory for the configured entry
 count and payload limit.
 
-The process exposes HTTP on port `8080` and RESP2 on port `6380`. Put both
+Start the process with `megacache serve`. It exposes HTTP on port `8080` and
+RESP2 on port `6380`. Put both
 behind appropriate network controls; use a TCP TLS proxy for RESP when traffic
 crosses a trusted boundary. The process runs as an unprivileged user in the
 supplied container, logs requests to standard output, and shuts down cleanly.
@@ -39,5 +40,5 @@ Treat MegaCache as optional infrastructure. Clients should enforce short
 timeouts and fall back to the authoritative origin when it is unavailable.
 Rate-limit that fallback to avoid transferring a cache outage to the origin.
 
-Because version 0.2 is in-memory, rolling restarts begin cold. Warm critical
+Because version 0.3 is in-memory, rolling restarts begin cold. Warm critical
 keys gradually or accept misses while using origin-side admission controls.

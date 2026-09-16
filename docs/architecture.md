@@ -3,9 +3,11 @@
 ## Components
 
 The HTTP and RESP2 servers are protocol adapters over one shared `CacheEngine`.
-The engine owns an ordered entry map, reverse tag index, lease table, flight
-table, and counters under one reentrant lock. This makes compound operations
-atomic within the process and keeps behavior consistent across protocols.
+The native `megacache` CLI connects through RESP2 using the packaged
+`MegaCacheClient`. The engine owns an ordered entry map, reverse tag index,
+lease table, flight table, and counters under one reentrant lock. This makes
+compound operations atomic within the process and keeps behavior consistent
+across interfaces.
 
 The HTTP server listens on port `8080`. The RESP2 server listens on port `6380`
 and accepts a documented subset of Redis commands plus `MC.*` extensions.
@@ -50,7 +52,7 @@ lease while followers receive a retry interval.
 
 ## Explicit non-guarantees
 
-Version 0.2 is a single-process cache. It does not replicate data, persist
+Version 0.3 is a single-process cache. It does not replicate data, persist
 entries, coordinate multiple MegaCache nodes, encrypt transport, or enforce
 durability. Restarting the process empties the cache. Deploy one instance per
 isolated workload or put it behind a single-target service until a distributed

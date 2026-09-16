@@ -35,28 +35,28 @@ Requires Python 3.9 or newer.
 
 ```bash
 make test
-make run
+python3 -m pip install .
+megacache serve
 ```
 
 MegaCache listens for RESP2 on port `6380` and HTTP on port `8080`.
 
-Use familiar Redis commands:
+Use the native MegaCache CLI:
 
 ```bash
-redis-cli -p 6380 SET product:123 '{"id":123,"name":"Desk"}' EX 300
-redis-cli -p 6380 GET product:123
-redis-cli -p 6380 TTL product:123
-redis-cli -p 6380 DEL product:123
+megacache ping
+megacache put product:123 '{"id":123,"name":"Desk"}' \
+  --ttl 300 --stale 900 --tag product:123 --tag catalog
+megacache get product:123
+megacache ttl product:123
+megacache invalidate catalog
 ```
 
-Use MegaCache extensions for stale windows, refresh leases, and tag
-invalidation:
+Redis clients remain supported through RESP2:
 
 ```bash
-redis-cli -p 6380 MC.SET product:123 '{"id":123}' \
-  TTL 300 STALE 900 TAGS 2 product:123 catalog
-redis-cli -p 6380 MC.LEASE product:123
-redis-cli -p 6380 MC.INVALIDATE catalog
+redis-cli -p 6380 SET compatibility:key value EX 300
+redis-cli -p 6380 GET compatibility:key
 ```
 
 The HTTP API is also available:
@@ -90,17 +90,16 @@ docker compose up --build
 On a cache miss, ask MegaCache for a refresh lease:
 
 ```bash
-curl -X POST http://localhost:8080/v1/lease/product%3A123
+megacache lease product:123
 ```
 
-The first caller receives `state: "lease"` and a `lease_token`. Other callers
-receive `state: "loading"` and a retry interval. The lease holder computes the
-value and writes it with the token:
+The first caller receives `lease` and a token. Other callers receive `loading`
+and a retry interval. The lease holder computes the value and writes it with
+the token:
 
 ```bash
-curl -X PUT http://localhost:8080/v1/cache/product%3A123 \
-  -H 'Content-Type: application/json' \
-  -d '{"value":{"id":123},"lease_token":"TOKEN_FROM_LEASE"}'
+megacache put product:123 '{"id":123}' \
+  --ttl 300 --stale 900 --lease TOKEN_FROM_LEASE
 ```
 
 This prevents a cache stampede without trusting a client-side distributed lock.
@@ -113,6 +112,8 @@ This prevents a cache stampede without trusting a client-side distributed lock.
 | `MEGACACHE_PORT` | `8080` | HTTP port |
 | `MEGACACHE_RESP_HOST` | `0.0.0.0` | RESP2 bind address |
 | `MEGACACHE_RESP_PORT` | `6380` | RESP2 port |
+| `MEGACACHE_CLI_HOST` | `127.0.0.1` | Native CLI target host |
+| `MEGACACHE_CLI_PORT` | `6380` | Native CLI target port |
 | `MEGACACHE_MAX_ENTRIES` | `10000` | Maximum entries before LRU eviction |
 | `MEGACACHE_MAX_BODY_BYTES` | `1048576` | Maximum JSON request size |
 | `MEGACACHE_DEFAULT_TTL_SECONDS` | `300` | Default fresh duration |
