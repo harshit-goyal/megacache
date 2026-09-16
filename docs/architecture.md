@@ -3,7 +3,7 @@
 ## Components
 
 The HTTP and RESP2 servers are protocol adapters over one shared `CacheEngine`.
-The native `megacache` CLI connects through RESP2 using the packaged
+The native `mc` CLI connects through RESP2 using the packaged
 `MegaCacheClient`. The engine owns an ordered entry map, reverse tag index,
 lease table, flight table, and counters under one reentrant lock. This makes
 compound operations atomic within the process and keeps behavior consistent

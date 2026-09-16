@@ -36,7 +36,7 @@ Requires Python 3.9 or newer.
 ```bash
 make test
 python3 -m pip install .
-megacache serve
+mc serve
 ```
 
 MegaCache listens for RESP2 on port `6380` and HTTP on port `8080`.
@@ -44,12 +44,12 @@ MegaCache listens for RESP2 on port `6380` and HTTP on port `8080`.
 Use the native MegaCache CLI:
 
 ```bash
-megacache ping
-megacache put product:123 '{"id":123,"name":"Desk"}' \
+mc ping
+mc put product:123 '{"id":123,"name":"Desk"}' \
   --ttl 300 --stale 900 --tag product:123 --tag catalog
-megacache get product:123
-megacache ttl product:123
-megacache invalidate catalog
+mc get product:123
+mc ttl product:123
+mc invalidate catalog
 ```
 
 Redis clients remain supported through RESP2:
@@ -90,7 +90,7 @@ docker compose up --build
 On a cache miss, ask MegaCache for a refresh lease:
 
 ```bash
-megacache lease product:123
+mc lease product:123
 ```
 
 The first caller receives `lease` and a token. Other callers receive `loading`
@@ -98,7 +98,7 @@ and a retry interval. The lease holder computes the value and writes it with
 the token:
 
 ```bash
-megacache put product:123 '{"id":123}' \
+mc put product:123 '{"id":123}' \
   --ttl 300 --stale 900 --lease TOKEN_FROM_LEASE
 ```
 

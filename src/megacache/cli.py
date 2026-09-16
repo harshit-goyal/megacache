@@ -19,11 +19,11 @@ from .server import MegaCacheServer
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="megacache",
+        prog="mc",
         description="Run and interact with MegaCache.",
     )
     parser.add_argument(
-        "--version", action="version", version="MegaCache 0.3.0"
+        "--version", action="version", version="MegaCache 0.3.1"
     )
     parser.add_argument(
         "--host",
@@ -140,7 +140,7 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
         ) as client:
             response = _execute(client, args)
     except (MegaCacheClientError, OSError, ValueError) as exc:
-        print("megacache: {}".format(exc), file=sys.stderr)
+        print("mc: {}".format(exc), file=sys.stderr)
         return 1
 
     if response is None and args.command == "get":

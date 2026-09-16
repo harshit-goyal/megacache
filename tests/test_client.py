@@ -112,7 +112,7 @@ class NativeClientTests(unittest.TestCase):
         with redirect_stdout(output), self.assertRaises(SystemExit) as exit_status:
             run(["--version"])
         self.assertEqual(0, exit_status.exception.code)
-        self.assertEqual("MegaCache 0.3.0", output.getvalue().strip())
+        self.assertEqual("MegaCache 0.3.1", output.getvalue().strip())
 
 
 if __name__ == "__main__":

@@ -13,7 +13,7 @@ Install the native command:
 
 ```bash
 python3 -m pip install .
-megacache --help
+mc --help
 ```
 
 ## Run locally
@@ -21,7 +21,7 @@ megacache --help
 MegaCache requires Python 3.9 or newer and has no runtime dependencies.
 
 ```bash
-megacache serve
+mc serve
 ```
 
 Equivalent command:
@@ -30,8 +30,9 @@ Equivalent command:
 make run
 ```
 
-Running `megacache` without a subcommand also starts the server for backward
-compatibility. The RESP2 service starts on `localhost:6380`; HTTP starts at
+Running `mc` without a subcommand starts the server. The legacy `megacache`
+executable remains available as a backward-compatible alias. The RESP2 service
+starts on `localhost:6380`; HTTP starts at
 `http://localhost:8080`.
 
 ## Configure
@@ -67,13 +68,13 @@ export REDISCLI_AUTH="$MEGACACHE_API_KEY"
 Check connectivity:
 
 ```bash
-megacache ping
+mc ping
 ```
 
 Store a value with fresh and stale windows:
 
 ```bash
-megacache put product:123 '{"id":123,"name":"Desk"}' \
+mc put product:123 '{"id":123,"name":"Desk"}' \
   --ttl 300 \
   --stale 900 \
   --tag product:123 \
@@ -83,68 +84,67 @@ megacache put product:123 '{"id":123,"name":"Desk"}' \
 Read and delete:
 
 ```bash
-megacache get product:123
-megacache delete product:123
+mc get product:123
+mc delete product:123
 ```
 
 Manage expiration:
 
 ```bash
-megacache expire product:123 300
-megacache ttl product:123
+mc expire product:123 300
+mc ttl product:123
 ```
 
 Work with multiple keys:
 
 ```bash
-megacache mset feature:a on feature:b off
-megacache mget feature:a feature:b
-megacache exists feature:a feature:b
+mc mset feature:a on feature:b off
+mc mget feature:a feature:b
+mc exists feature:a feature:b
 ```
 
 Coordinate a refresh:
 
 ```bash
-megacache lease product:123
-megacache put product:123 '{"id":123,"name":"Updated desk"}' \
+mc lease product:123
+mc put product:123 '{"id":123,"name":"Updated desk"}' \
   --ttl 300 --stale 900 --lease TOKEN_FROM_LEASE
 ```
 
 Invalidate related entries:
 
 ```bash
-megacache invalidate catalog product:123
+mc invalidate catalog product:123
 ```
 
 Inspect the server:
 
 ```bash
-megacache dbsize
-megacache info
+mc dbsize
+mc info
 ```
 
 Clear all entries only with explicit confirmation:
 
 ```bash
-megacache flush --yes
+mc flush --yes
 ```
 
 For automation, place `--json` before the subcommand:
 
 ```bash
-megacache --json get product:123
-megacache --json lease product:123
+mc --json get product:123
+mc --json lease product:123
 ```
 
 Connection flags also precede the subcommand:
 
 ```bash
-megacache --host cache.internal --port 6380 ping
+mc --host cache.internal --port 6380 ping
 ```
 
 The native command reads its password from `MEGACACHE_API_KEY`. The complete
-syntax is available through `megacache --help` and
-`megacache <command> --help`.
+syntax is available through `mc --help` and `mc <command> --help`.
 
 ## Redis CLI compatibility
 
@@ -358,6 +358,6 @@ python3 -m pip wheel --no-deps --wheel-dir dist .
 Install the generated wheel:
 
 ```bash
-python3 -m pip install dist/megacache-0.3.0-py3-none-any.whl
-megacache
+python3 -m pip install dist/megacache-0.3.1-py3-none-any.whl
+mc
 ```

@@ -7,7 +7,7 @@ Run MegaCache on a private network behind a TLS-terminating reverse proxy. Set
 container filesystem, and allocate enough memory for the configured entry
 count and payload limit.
 
-Start the process with `megacache serve`. It exposes HTTP on port `8080` and
+Start the process with `mc serve`. It exposes HTTP on port `8080` and
 RESP2 on port `6380`. Put both
 behind appropriate network controls; use a TCP TLS proxy for RESP when traffic
 crosses a trusted boundary. The process runs as an unprivileged user in the
