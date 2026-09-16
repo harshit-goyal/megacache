@@ -8,14 +8,16 @@ network policy, use a read-only container filesystem, and allocate enough
 memory for configured byte and entry limits.
 
 Start the process with `mc serve`. `SIGINT` and `SIGTERM` stop both listeners,
-allow active handlers up to `MEGACACHE_SHUTDOWN_GRACE_SECONDS` to finish, then
-close remaining connections. It exposes HTTP on port `8080` and
+signal origin shutdown before waiting on active handlers, allow up to
+`MEGACACHE_SHUTDOWN_GRACE_SECONDS` to finish, then close remaining connections
+and bounded origin workers. Origin admission, retry backoff, refresh workers,
+and coalesced followers observe that signal. It exposes HTTP on port `8080` and
 RESP2 on port `6380`. Put both
 behind appropriate network controls; use a TCP TLS proxy for RESP when traffic
 crosses a trusted boundary. The process runs as an unprivileged user in the
 supplied container, logs requests to standard output, and shuts down cleanly.
 
-Version 0.5's cluster is in-process. A comma-separated
+Version 0.6's cluster is in-process. A comma-separated
 `MEGACACHE_CLUSTER_NODES` value creates independent logical storage nodes
 managed by one coordinator. This is useful for embedded operation, exercising
 replication behavior, and validating failure procedures, but it is not a
@@ -34,6 +36,43 @@ mc serve
 
 Every logical node receives the configured per-node entry and memory limits.
 Plan process memory for their sum plus transfer buffers.
+
+Origin singleflight is cluster-wide only inside this one coordinator object.
+Running the same origin file in multiple processes creates independent
+singleflight tables, retry budgets, breakers, and concurrency budgets.
+
+## Origin configuration
+
+Copy `origins.example.json`, narrow its authority and policy, then configure:
+
+```bash
+export MEGACACHE_ORIGINS_FILE="$PWD/origins.json"
+export MEGACACHE_ORIGIN_WORKER_THREADS=2
+export MEGACACHE_ORIGIN_REFRESH_QUEUE_SIZE=1000
+export MEGACACHE_ORIGIN_GLOBAL_MAX_CONCURRENCY=64
+export MEGACACHE_ORIGIN_GLOBAL_MAX_QUEUE=256
+mc serve
+```
+
+Per-origin limits live in the JSON definition: timeout, response bytes,
+concurrency, queue depth and wait timeout, retries, token budget, backoff,
+jitter, circuit-breaker thresholds, freshness windows, and negative statuses.
+Definitions are validated and loaded once at startup.
+
+Ordinary public unicast DNS addresses need no network CIDR entry. Private,
+loopback, link-local, multicast, reserved, unspecified, NAT64,
+IPv4-mapped/translatable, 6to4, Teredo, and other transition addresses are
+rejected by default, including unsafe embedded IPv4 addresses. Only an explicit
+`allowed_ip_networks` CIDR can permit an exception. Keep those CIDRs as narrow
+as possible. MegaCache pins connections to validated addresses and does not
+follow redirects, but origin authorization and data classification remain
+operator responsibilities.
+
+`max_queue` also bounds followers for each coalesced origin flight, while
+`MEGACACHE_ORIGIN_GLOBAL_MAX_QUEUE` bounds followers across flights.
+`queue_timeout_seconds` limits their wait. Built-in storage renews refresh
+leases for the duration of admitted origin work; tag invalidation removes both
+the entry and lease so late refreshes cannot repopulate invalidated keys.
 
 ## Capacity planning
 
@@ -73,6 +112,10 @@ Scrape `/metrics` and alert on:
 - `megacache_request_errors_total`;
 - `megacache_cluster_degraded`, logical node health, ring version, leadership
   term, and replication lag from `mc topology` and `mc status`.
+- `megacache_origin_requests_total` by origin/outcome;
+- `megacache_origin_breaker_state`, concurrency, and queue depth;
+- `origin_load_shed_total`, retry exhaustion, stale-if-error, negative hits,
+  and refresh errors from `mc info` or `/v1/stats`.
 
 Counters reset at process restart. `entries`, `tags`, and `active_leases` are
 gauges; other exported values are cumulative counters.
@@ -119,12 +162,13 @@ Snapshot sessions enforce
 `MEGACACHE_SNAPSHOT_CHUNK_BYTES`, and
 `MEGACACHE_SNAPSHOT_MAX_IN_FLIGHT`.
 
-There is no native node RPC in 0.5. Real packet loss, asymmetric partitions,
+There is no native node RPC in 0.6. Real packet loss, asymmetric partitions,
 cross-host clocks, and process split brain are outside implemented behavior.
 
 Treat MegaCache as optional infrastructure. Clients should enforce short
 timeouts and fall back to the authoritative origin when it is unavailable.
 Rate-limit that fallback to avoid transferring a cache outage to the origin.
 
-Because version 0.5 is in-memory, rolling restarts begin cold. Warm critical
-keys gradually or accept misses while using origin-side admission controls.
+Because version 0.6 is in-memory, rolling restarts begin cold. Warm critical
+keys gradually with `mc fetch`; the same admission and origin protection
+policies apply to warming.

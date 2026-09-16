@@ -361,7 +361,7 @@ class RebalancePlan:
 class _Flight:
     def __init__(self) -> None:
         self.event = threading.Event()
-        self.result: Optional[CacheResult] = None
+        self.result: Any = None
         self.error: Optional[BaseException] = None
 
 
@@ -465,6 +465,7 @@ class ClusterStorage:
         self._leases: Dict[str, _ClusterLease] = {}
         self._lease_bytes = 0
         self._flights: Dict[str, _Flight] = {}
+        self._coordination_flights: Dict[str, _Flight] = {}
         self._metrics: Dict[str, int] = defaultdict(int)
         self._request_counts: Dict[Tuple[str, str, str], int] = defaultdict(int)
         self._latency_counts: Dict[Tuple[str, str, float], int] = defaultdict(int)
@@ -984,14 +985,16 @@ class ClusterStorage:
             self._metrics["invalidations_total"] += removed
             return removed
 
-    def acquire_lease(self, key: str) -> CacheResult:
+    def acquire_lease(self, key: str, force: bool = False) -> CacheResult:
         self._validate_key(key)
+        if not isinstance(force, bool):
+            raise ValueError("force must be a boolean")
         now = self._clock()
         with self._lock:
             self._detect_failures_locked()
             self._purge_expired_leases_locked(now)
             result = self.get(key)
-            if result.state == "fresh":
+            if result.state == "fresh" and not force:
                 return result
             owners = self._ring.owners(key, self._replica_count)
             required = self._consistency.required(len(owners))
@@ -1049,6 +1052,35 @@ class ClusterStorage:
                 expires_in_seconds=self._lease_seconds,
             )
 
+    def release_lease(self, key: str, lease_token: str) -> bool:
+        self._validate_key(key)
+        if not isinstance(lease_token, str):
+            raise ValueError("lease token must be a string")
+        with self._lock:
+            lease = self._leases.get(key)
+            if lease is None or not secrets.compare_digest(
+                lease.token, lease_token
+            ):
+                return False
+            return self._remove_lease_locked(key)
+
+    def renew_lease(self, key: str, lease_token: str) -> bool:
+        self._validate_key(key)
+        if not isinstance(lease_token, str):
+            raise ValueError("lease token must be a string")
+        now = self._clock()
+        with self._lock:
+            lease = self._leases.get(key)
+            if lease is None or lease.until <= now:
+                self._remove_lease_locked(key)
+                return False
+            self._assert_fence_locked(lease.fence)
+            if not secrets.compare_digest(lease.token, lease_token):
+                return False
+            lease.until = now + self._lease_seconds
+            self._metrics["lease_renewals_total"] += 1
+            return True
+
     def get_or_load(
         self,
         key: str,
@@ -1092,6 +1124,34 @@ class ClusterStorage:
         finally:
             with self._lock:
                 self._flights.pop(key, None)
+                flight.event.set()
+
+    def coordinate(self, key: str, loader: Callable[[], Any]) -> Any:
+        """Single-coordinator singleflight shared by every logical node."""
+        self._validate_key(key)
+        with self._lock:
+            flight = self._coordination_flights.get(key)
+            leader = flight is None
+            if leader:
+                flight = _Flight()
+                self._coordination_flights[key] = flight
+            else:
+                self._metrics["coalesced_total"] += 1
+        assert flight is not None
+        if not leader:
+            flight.event.wait()
+            if flight.error is not None:
+                raise flight.error
+            return flight.result
+        try:
+            flight.result = loader()
+            return flight.result
+        except BaseException as exc:
+            flight.error = exc
+            raise
+        finally:
+            with self._lock:
+                self._coordination_flights.pop(key, None)
                 flight.event.set()
 
     def export_entries(

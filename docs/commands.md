@@ -74,6 +74,18 @@ mc ping
 `mc hash-password` prints a salted PBKDF2 hash for adding more users to the
 file. See [Security](../SECURITY.md) for its format and permission model.
 
+Enable protected HTTP origins with a declarative file:
+
+```bash
+cp origins.example.json origins.json
+# Replace the example authority, allowlists, and policy.
+export MEGACACHE_ORIGINS_FILE="$PWD/origins.json"
+mc serve
+```
+
+Origins are loaded at startup. The server never accepts a destination URL from
+a client; callers select a configured origin and supply only an allowed path.
+
 The examples below use this shell variable:
 
 ```bash
@@ -136,6 +148,19 @@ Invalidate related entries:
 mc invalidate catalog product:123
 ```
 
+Read through a configured HTTP origin:
+
+```bash
+mc fetch product:123 catalog /v1/products/123
+mc fetch product:123 catalog /v1/products/123 --refresh
+```
+
+The first form returns a fresh cached value, schedules refresh-ahead or
+stale-while-revalidate work when policy requires it, or performs one
+coalesced origin request. `--refresh` bypasses a fresh cached value but still
+uses singleflight and every origin protection budget. Fetch requires both
+`read` and `write` permission for the key.
+
 Inspect the server:
 
 ```bash
@@ -144,12 +169,15 @@ mc info
 mc topology
 mc topology product:123
 mc status
+mc origins
 ```
 
 `mc topology` reports the ring version and fingerprint, leader term, logical
 nodes, ownership counts, replica lag, configured consistency, and degraded
 state. Supplying a key reports its primary and replica owners. `mc status`
 returns a compact health summary. Both require administrator permission.
+`mc origins` reports per-origin breaker state, active concurrency, queue depth,
+retry tokens, and failure count; it also requires administrator permission.
 
 Clear all entries only with explicit confirmation:
 
@@ -391,6 +419,6 @@ python3 -m pip wheel --no-deps --wheel-dir dist .
 Install the generated wheel:
 
 ```bash
-python3 -m pip install dist/megacache-0.5.0-py3-none-any.whl
+python3 -m pip install dist/megacache-0.6.0-py3-none-any.whl
 mc
 ```

@@ -58,6 +58,38 @@ Returns `200` when deleted and `404` when the key did not exist.
 
 ## Refresh coordination
 
+### `POST /v1/fetch/{key}`
+
+Reads through a named declarative HTTP origin. Both `read` and `write`
+permission for the key are required.
+
+```json
+{
+  "origin": "catalog",
+  "path": "/v1/products/123",
+  "refresh": false
+}
+```
+
+`origin` must name an entry loaded from `MEGACACHE_ORIGINS_FILE`. `path` must
+be an absolute path inside that origin's explicit path-prefix allowlist;
+schemes, authorities, fragments, traversal, and network-path references are
+rejected. Clients cannot submit a URL. `refresh` defaults to false.
+
+Successful states are:
+
+- `fresh`: returned from the fresh cache window;
+- `refreshed`: one protected origin request populated the cache;
+- `stale`: stale-while-revalidate returned immediately and queued refresh;
+- `stale_if_error`: a failed refresh returned stale data inside its configured
+  safety window;
+- `negative`: a configured 4xx response was negatively cached.
+
+The response includes the origin name, origin status when available, attempts,
+and value. Origin bodies include `value_encoding` (`utf-8` or `base64`) when
+represented in JSON. Overload returns `429`, origin or breaker failure returns
+`503`, and policy violations return `400`.
+
 ### `POST /v1/lease/{key}`
 
 Possible responses:
@@ -93,6 +125,7 @@ Returns `{"invalidated": 12}`.
   cluster consistency profile cannot be met.
 - `GET /metrics`: Prometheus text exposition.
 - `GET /v1/stats`: JSON metric snapshot.
+- `GET /v1/origins`: administrator-only origin health and breaker state.
 
 Errors are JSON objects with a stable `error` identifier and, for invalid
 requests, a human-readable `message`.

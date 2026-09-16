@@ -18,6 +18,17 @@ def _positive_int(name: str, default: int) -> int:
     return value
 
 
+def _non_negative_int(name: str, default: int) -> int:
+    raw = os.getenv(name, str(default))
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError("{} must be an integer".format(name)) from exc
+    if value < 0:
+        raise ValueError("{} must not be negative".format(name))
+    return value
+
+
 def _optional_path(name: str) -> Optional[str]:
     return os.getenv(name) or None
 
@@ -90,6 +101,11 @@ class Config:
     snapshot_chunk_bytes: int = 262_144
     snapshot_max_in_flight: int = 2
     max_retained_tombstones: int = 10_000
+    origins_file: Optional[str] = None
+    origin_worker_threads: int = 2
+    origin_refresh_queue_size: int = 1_000
+    origin_global_max_concurrency: int = 64
+    origin_global_max_queue: int = 256
 
     def __post_init__(self) -> None:
         if (
@@ -130,8 +146,12 @@ class Config:
             or self.snapshot_chunk_bytes <= 0
             or self.snapshot_max_in_flight <= 0
             or self.max_retained_tombstones <= 0
+            or self.origin_worker_threads <= 0
+            or self.origin_refresh_queue_size <= 0
+            or self.origin_global_max_concurrency <= 0
+            or self.origin_global_max_queue < 0
         ):
-            raise ValueError("snapshot and tombstone limits must be positive")
+            raise ValueError("configured capacity limits are invalid")
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -190,5 +210,18 @@ class Config:
             ),
             max_retained_tombstones=_positive_int(
                 "MEGACACHE_MAX_RETAINED_TOMBSTONES", 10_000
+            ),
+            origins_file=_optional_path("MEGACACHE_ORIGINS_FILE"),
+            origin_worker_threads=_positive_int(
+                "MEGACACHE_ORIGIN_WORKER_THREADS", 2
+            ),
+            origin_refresh_queue_size=_positive_int(
+                "MEGACACHE_ORIGIN_REFRESH_QUEUE_SIZE", 1_000
+            ),
+            origin_global_max_concurrency=_positive_int(
+                "MEGACACHE_ORIGIN_GLOBAL_MAX_CONCURRENCY", 64
+            ),
+            origin_global_max_queue=_non_negative_int(
+                "MEGACACHE_ORIGIN_GLOBAL_MAX_QUEUE", 256
             ),
         )

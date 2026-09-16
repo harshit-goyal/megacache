@@ -10,6 +10,7 @@ from typing import Any, Iterable, List, Optional, Sequence, Tuple
 from .auth import AuthManager, Principal
 from .config import Config
 from .engine import CacheResult
+from .origin import OriginError, OriginOverloaded
 from .storage import StorageBackend
 from .transport import TLSRequestMixin
 
@@ -134,6 +135,8 @@ class MegaCacheRespHandler(socketserver.StreamRequestHandler):
             "MC.INVALIDATE",
             "MC.TOPOLOGY",
             "MC.STATUS",
+            "MC.FETCH",
+            "MC.ORIGINS",
         }
         return command if command in supported else "UNKNOWN"
 
@@ -215,6 +218,8 @@ class MegaCacheRespHandler(socketserver.StreamRequestHandler):
             "MC.INVALIDATE": self._mc_invalidate,
             "MC.TOPOLOGY": self._mc_topology,
             "MC.STATUS": self._mc_status,
+            "MC.FETCH": self._mc_fetch,
+            "MC.ORIGINS": self._mc_origins,
         }
         if command == "QUIT":
             self._require_arity(args, 1)
@@ -371,7 +376,7 @@ class MegaCacheRespHandler(socketserver.StreamRequestHandler):
         lines = [
             "# Server",
             "redis_version:7.2.0",
-            "megacache_version:0.5.0",
+            "megacache_version:0.6.0",
             "redis_mode:standalone",
             "# Keyspace",
             "db0:keys={}".format(self.server.engine.size()),
@@ -409,7 +414,7 @@ class MegaCacheRespHandler(socketserver.StreamRequestHandler):
             b"server",
             b"megacache",
             b"version",
-            b"0.5.0",
+            b"0.6.0",
             b"proto",
             2,
             b"mode",
@@ -550,6 +555,50 @@ class MegaCacheRespHandler(socketserver.StreamRequestHandler):
             if status is None
             else status()
         )
+        return json.dumps(value, separators=(",", ":")).encode("utf-8")
+
+    def _mc_fetch(self, args: Sequence[bytes]) -> bytes:
+        if len(args) not in (4, 5):
+            raise RespCommandError(
+                "wrong number of arguments for 'mc.fetch' command"
+            )
+        key = self._key(args[1])
+        self._authorize("read", (key,))
+        self._authorize("write", (key,))
+        fetch = getattr(self.server.engine, "fetch", None)
+        if fetch is None:
+            raise RespCommandError(
+                "HTTP origins are not configured on this server"
+            )
+        try:
+            origin = args[2].decode("utf-8")
+            path = args[3].decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise RespCommandError(
+                "origin name and path must be valid UTF-8"
+            ) from exc
+        force_refresh = False
+        if len(args) == 5:
+            if args[4].upper() != b"REFRESH":
+                raise RespCommandError("unknown MC.FETCH option")
+            force_refresh = True
+        try:
+            result = fetch(
+                key, origin, path, force_refresh=force_refresh
+            )
+        except OriginOverloaded as exc:
+            raise RespCommandError("BUSY {}".format(exc)) from exc
+        except OriginError as exc:
+            raise RespCommandError(str(exc)) from exc
+        return json.dumps(
+            result.as_json(), separators=(",", ":")
+        ).encode("utf-8")
+
+    def _mc_origins(self, args: Sequence[bytes]) -> bytes:
+        self._require_arity(args, 1)
+        self._authorize("admin")
+        origins = getattr(self.server.engine, "origins", None)
+        value = {} if origins is None else origins()
         return json.dumps(value, separators=(",", ":")).encode("utf-8")
 
     def _authorize(self, permission: str, keys: Iterable[str] = ()) -> None:

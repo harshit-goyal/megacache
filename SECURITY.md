@@ -65,9 +65,36 @@ Cached values reside in process memory and must be treated according to their
 data classification. Request logs intentionally exclude cache keys, values,
 authorization headers, passwords, and RESP arguments.
 
+## HTTP origin security
+
+`mc fetch` and `MC.FETCH` never accept a destination URL. They accept a
+configured origin name plus an absolute path. Every origin must declare:
+
+- one fixed `http` or `https` authority;
+- exact allowed hostnames and ports;
+- normalized allowed path prefixes; and
+- explicit CIDRs for any intentionally reachable address denied by default.
+
+MegaCache resolves the declared hostname on every attempt, rejects the request
+unless every answer is ordinary global unicast or CIDR-allowlisted, and pins
+the connection to a validated address. Private, loopback, link-local,
+multicast, reserved, unspecified, NAT64, IPv4-mapped/translatable, 6to4,
+Teredo, and other transition addresses are denied by default. Embedded IPv4
+addresses receive the same validation. HTTPS still verifies the certificate
+against the declared hostname. Redirects are not followed. Userinfo,
+fragments, path traversal, network-path references, encoded slashes, unsafe
+fixed headers, and oversized responses are rejected.
+
+Treat `MEGACACHE_ORIGINS_FILE` as security-sensitive configuration. Keep
+allowlists narrow, prefer TLS, use dedicated origin credentials with read-only
+scope, and restrict configuration-file permissions. Adding broad private
+network CIDRs materially expands what a compromised write-capable MegaCache
+client can reach. Origin definitions are loaded at startup, so restart after
+rotation. MegaCache 0.6 intentionally has no arbitrary URL mode.
+
 ## Cluster security boundary
 
-Version 0.5 provides an in-process cluster coordinator and no node-to-node
+Version 0.6 provides an in-process cluster coordinator and no node-to-node
 network listener. Logical node IDs in `MEGACACHE_CLUSTER_NODES` are local
 configuration, not authenticated identities. Do not expose or build an
 unauthenticated RPC shim around `ClusterStorage`.
@@ -77,3 +104,7 @@ encryption, replay protection, message and snapshot size enforcement, term and
 ring-version validation, and authorization for membership changes. Until then,
 all logical replicas share one process security boundary and fail together if
 that process is compromised or terminated.
+
+Origin singleflight is likewise shared only inside one current
+`ClusterStorage` coordinator. Separate processes do not coordinate origin
+requests and must be budgeted independently.

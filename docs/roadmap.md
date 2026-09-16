@@ -57,13 +57,14 @@ Acceptance criteria:
   partitions are outside version 0.5 because there is no node RPC transport.
 - The CLI reports topology, ownership, replication lag, and degraded state.
 
-## Phase 3: origin protection
+## Phase 3: HTTP origin protection — complete in 0.6
 
 Deliverables:
 
-- Declarative HTTP and database origin definitions
+- Declarative HTTP origin definitions with exact authority, path, and network
+  allowlists
 - Read-through `mc fetch` operation
-- Cluster-wide singleflight and refresh ownership
+- Single-coordinator singleflight and refresh ownership
 - Refresh-ahead and stale-while-revalidate workers
 - Stale-if-error and negative-cache policies
 - Per-origin concurrency budgets, queues, and timeouts
@@ -71,11 +72,34 @@ Deliverables:
 - Circuit breakers and origin health metrics
 - Admission control and load shedding
 
+Version 0.6 implements these behaviors in `OriginCache`, which wraps either
+`CacheEngine` or `ClusterStorage` without changing version 0.5 constructors or
+storage operations. HTTP origins are startup-loaded declarations. Clients can
+select a named origin and an allowed path but can never supply a URL.
+
+SSRF controls require exact host and port allowlists, normalized path prefixes,
+and explicit CIDRs for non-public addresses. DNS is checked on every attempt,
+connections are pinned to validated addresses, HTTPS preserves hostname
+verification, and redirects are not followed.
+
+Singleflight is cluster-wide only within the current in-process
+`ClusterStorage` coordinator boundary. Independently deployed processes do not
+coordinate flights, breakers, retry tokens, or concurrency budgets. Database
+origin adapters are intentionally not claimed in 0.6; database change-stream
+integration remains part of Phase 4 rather than being simulated through an
+unsafe generic connector.
+
 Acceptance criteria:
 
-- Concurrent misses for one key produce one origin request across the cluster.
+- Concurrent misses for one key produce one origin request across all logical
+  nodes sharing one coordinator.
 - Origin failure serves stale data only within configured safety windows.
 - Cache failure cannot create unbounded origin concurrency.
+
+Tests cover concurrent coordinator miss coalescing, refresh-ahead,
+stale-while-revalidate, stale-if-error boundaries, negative responses, retry
+budgets and backoff, concurrency and queue shedding, breaker transitions,
+timeouts, response limits, redirect handling, SSRF policy, and shutdown.
 
 ## Phase 4: freshness automation
 

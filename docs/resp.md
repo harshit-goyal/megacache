@@ -129,6 +129,21 @@ MC.INVALIDATE tag [tag ...]
 
 The integer response is the number of deleted entries.
 
+### `MC.FETCH`
+
+Reads through a named declarative HTTP origin:
+
+```text
+MC.FETCH key origin /allowed/path
+MC.FETCH key origin /allowed/path REFRESH
+```
+
+The command requires read and write permission for the key. It returns compact
+JSON containing `state`, `origin`, `status_code`, `attempts`, `value`, and
+optional `error`. `REFRESH` bypasses a fresh cached value but does not bypass
+singleflight, allowlists, admission, retry, timeout, or breaker policy. The
+path must be allowed by the named origin; URLs are never accepted.
+
 ### `MC.TOPOLOGY`
 
 Returns compact JSON describing the coordinator ring, leader term, nodes,
@@ -146,6 +161,12 @@ owners. Administrator permission is required.
 
 Returns compact JSON with logical node health, ring version, total replication
 lag, known key count, and degraded state. Administrator permission is required.
+
+### `MC.ORIGINS`
+
+Returns compact JSON containing each configured origin's circuit-breaker state,
+active concurrency, bounded queue depth, retry tokens, and failure count.
+Administrator permission is required.
 
 ## Compatibility boundaries
 

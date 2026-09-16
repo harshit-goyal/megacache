@@ -1,0 +1,35 @@
+{
+  "origins": [
+    {
+      "name": "catalog",
+      "base_url": "https://catalog.example.com",
+      "allowed_hosts": ["catalog.example.com"],
+      "allowed_ports": [443],
+      "allowed_path_prefixes": ["/v1/products/"],
+      "headers": {
+        "Accept": "application/json"
+      },
+      "ttl_seconds": 300,
+      "refresh_ahead_seconds": 30,
+      "stale_while_revalidate_seconds": 120,
+      "stale_if_error_seconds": 300,
+      "negative_statuses": [404, 410],
+      "negative_ttl_seconds": 30,
+      "timeout_seconds": 2,
+      "queue_timeout_seconds": 0.25,
+      "max_response_bytes": 1048576,
+      "max_concurrency": 16,
+      "max_queue": 64,
+      "retry_attempts": 2,
+      "retry_backoff_seconds": 0.05,
+      "retry_max_backoff_seconds": 0.5,
+      "retry_jitter": 0.2,
+      "retry_budget_capacity": 32,
+      "retry_budget_refill_per_second": 2,
+      "breaker_failure_threshold": 5,
+      "breaker_open_seconds": 30,
+      "breaker_half_open_requests": 1,
+      "tags": ["origin:catalog"]
+    }
+  ]
+}

@@ -18,6 +18,7 @@ from .cluster import ClusterNode, ClusterStorage
 from .config import Config
 from .engine import CacheEngine
 from .observability import configure_logging
+from .origin import OriginCache
 from .resp import MegaCacheRespServer
 from .server import MegaCacheServer
 from .transport import enable_server_tls, validate_tls_config
@@ -29,7 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Run and interact with MegaCache.",
     )
     parser.add_argument(
-        "--version", action="version", version="MegaCache 0.5.0"
+        "--version", action="version", version="MegaCache 0.6.0"
     )
     parser.add_argument(
         "--host",
@@ -112,6 +113,18 @@ def build_parser() -> argparse.ArgumentParser:
     get = commands.add_parser("get", help="read a cached value")
     get.add_argument("key")
 
+    fetch = commands.add_parser(
+        "fetch", help="read through a configured HTTP origin"
+    )
+    fetch.add_argument("key")
+    fetch.add_argument("origin")
+    fetch.add_argument(
+        "path", help="allowed absolute path on the named origin"
+    )
+    fetch.add_argument(
+        "--refresh", action="store_true", help="force an origin refresh"
+    )
+
     delete = commands.add_parser("delete", aliases=["del"], help="delete keys")
     delete.add_argument("keys", nargs="+")
 
@@ -141,6 +154,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     commands.add_parser(
         "status", help="show cluster health and replication status"
+    )
+    commands.add_parser(
+        "origins", help="show configured origin health and breaker state"
     )
 
     flush = commands.add_parser("flush", help="delete every cache entry")
@@ -234,6 +250,11 @@ def _execute(client: MegaCacheClient, args: argparse.Namespace) -> Any:
         return client.command(*parts)
     if command == "get":
         return client.command("GET", args.key)
+    if command == "fetch":
+        parts = ["MC.FETCH", args.key, args.origin, args.path]
+        if args.refresh:
+            parts.append("REFRESH")
+        return _decode_json_response(client.command(*parts))
     if command in ("delete", "del"):
         return client.command("DEL", *args.keys)
     if command == "exists":
@@ -257,6 +278,8 @@ def _execute(client: MegaCacheClient, args: argparse.Namespace) -> Any:
         return _decode_json_response(client.command(*parts))
     if command == "status":
         return _decode_json_response(client.command("MC.STATUS"))
+    if command == "origins":
+        return _decode_json_response(client.command("MC.ORIGINS"))
     if command == "flush":
         return client.command("FLUSHDB")
     if command == "lease":
@@ -307,6 +330,15 @@ def _serve(args: argparse.Namespace) -> int:
         max_lease_memory_bytes=config.max_memory_bytes,
         max_retained_tombstones=config.max_retained_tombstones,
     )
+    if config.origins_file is not None:
+        engine = OriginCache.from_file(
+            engine,
+            config.origins_file,
+            worker_threads=config.origin_worker_threads,
+            refresh_queue_size=config.origin_refresh_queue_size,
+            global_max_concurrency=config.origin_global_max_concurrency,
+            global_max_queue=config.origin_global_max_queue,
+        )
     http_server = MegaCacheServer((config.host, config.port), config, engine)
     resp_server = MegaCacheRespServer(
         (config.resp_host, config.resp_port), config, engine
@@ -333,6 +365,11 @@ def _serve(args: argparse.Namespace) -> int:
     shutdown_started = threading.Event()
     shutdown_threads: List[threading.Thread] = []
 
+    def begin_engine_shutdown() -> None:
+        begin_shutdown = getattr(engine, "begin_shutdown", None)
+        if begin_shutdown is not None:
+            begin_shutdown()
+
     def shutdown() -> None:
         if shutdown_started.is_set():
             return
@@ -340,6 +377,7 @@ def _serve(args: argparse.Namespace) -> int:
         heartbeat_stopped.set()
         http_server.start_draining()
         resp_server.start_draining()
+        begin_engine_shutdown()
         http_server.shutdown()
         resp_server.shutdown()
         drain_threads = [
@@ -379,6 +417,7 @@ def _serve(args: argparse.Namespace) -> int:
         shutdown_thread.start()
     finally:
         heartbeat_stopped.set()
+        begin_engine_shutdown()
         if shutdown_threads:
             shutdown_threads[-1].join(
                 timeout=config.shutdown_grace_seconds + 5
@@ -389,6 +428,9 @@ def _serve(args: argparse.Namespace) -> int:
         resp_server.server_close()
         resp_thread.join(timeout=5)
         heartbeat_thread.join(timeout=config.heartbeat_interval_seconds + 1)
+        close_engine = getattr(engine, "close", None)
+        if close_engine is not None:
+            close_engine(config.shutdown_grace_seconds)
         for signum, previous in previous_handlers.items():
             signal.signal(signum, previous)
     return 0
@@ -463,11 +505,11 @@ def _json_value(value: Any) -> Any:
 
 def _decode_json_response(value: Any) -> Any:
     if not isinstance(value, bytes):
-        raise ValueError("server returned an invalid topology response")
+        raise ValueError("server returned an invalid JSON response")
     try:
         decoded = json.loads(value.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ValueError("server returned invalid topology JSON") from exc
+        raise ValueError("server returned invalid JSON") from exc
     if not isinstance(decoded, dict):
-        raise ValueError("server returned invalid topology JSON")
+        raise ValueError("server returned invalid JSON")
     return decoded

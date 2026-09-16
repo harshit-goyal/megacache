@@ -41,6 +41,18 @@ class CacheEngineTests(unittest.TestCase):
         self.assertEqual(2, self.cache.invalidate_tags(["product"]))
         self.assertEqual("miss", self.cache.get("p:1").state)
 
+    def test_tag_invalidation_atomically_removes_refresh_lease(self):
+        self.cache.put("p:1", 1, tags=["product"])
+        lease = self.cache.acquire_lease("p:1", force=True)
+
+        self.assertEqual(1, self.cache.invalidate_tags(["product"]))
+        self.assertEqual(0, self.cache.stats()["active_leases"])
+        with self.assertRaisesRegex(ValueError, "lease is missing or expired"):
+            self.cache.put(
+                "p:1", 2, tags=["product"], lease_token=lease.lease_token
+            )
+        self.assertEqual("miss", self.cache.get("p:1").state)
+
     def test_lru_evicts_least_recently_used(self):
         self.cache.put("a", 1)
         self.cache.put("b", 2)
@@ -167,6 +179,18 @@ class CacheEngineTests(unittest.TestCase):
         clock.advance(6)
         cache.acquire_lease("second")
         self.assertEqual(1, cache.stats()["active_leases"])
+
+    def test_lease_renewal_extends_matching_ownership_only(self):
+        lease = self.cache.acquire_lease("key")
+        self.clock.advance(4)
+        self.assertTrue(
+            self.cache.renew_lease("key", lease.lease_token)
+        )
+        self.clock.advance(2)
+        self.assertEqual(
+            "loading", self.cache.acquire_lease("key", force=True).state
+        )
+        self.assertFalse(self.cache.renew_lease("key", "wrong"))
 
     def test_original_positional_constructor_order_is_preserved(self):
         clock = FakeClock()

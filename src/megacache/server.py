@@ -13,6 +13,11 @@ from .auth import AuthManager, Principal
 from .cluster import QuorumError
 from .config import Config
 from .engine import CacheResult
+from .origin import (
+    OriginOverloaded,
+    OriginPolicyError,
+    OriginUnavailable,
+)
 from .storage import StorageBackend
 from .transport import TLSRequestMixin
 
@@ -71,6 +76,12 @@ class MegaCacheHandler(BaseHTTPRequestHandler):
                 return
             self._json(200, self.server.engine.stats())
             return
+        if path == "/v1/origins":
+            if not self._authorized("admin"):
+                return
+            origins = getattr(self.server.engine, "origins", None)
+            self._json(200, {} if origins is None else origins())
+            return
         key = self._key_from(path, "/v1/cache/")
         if key is not None:
             if not self._authorized("read", (key,)):
@@ -123,6 +134,59 @@ class MegaCacheHandler(BaseHTTPRequestHandler):
         self._request_started = time.perf_counter()
         self.close_connection = True
         path = urlsplit(self.path).path
+        key = self._key_from(path, "/v1/fetch/")
+        if key is not None:
+            if not self._authorized("read", (key,)):
+                return
+            if not self._authorized("write", (key,)):
+                return
+            fetch = getattr(self.server.engine, "fetch", None)
+            if fetch is None:
+                self._json(
+                    503,
+                    {
+                        "error": "origins_not_configured",
+                        "message": "HTTP origins are not configured",
+                    },
+                )
+                return
+            try:
+                body = self._read_json()
+                if "origin" not in body or "path" not in body:
+                    raise ValueError("origin and path are required")
+                refresh = body.get("refresh", False)
+                if not isinstance(refresh, bool):
+                    raise ValueError("refresh must be a boolean")
+                result = fetch(
+                    key,
+                    body["origin"],
+                    body["path"],
+                    force_refresh=refresh,
+                )
+                self._json(200, result.as_json())
+            except OriginOverloaded as exc:
+                self._json(
+                    429,
+                    {"error": "origin_overloaded", "message": str(exc)},
+                )
+            except OriginPolicyError as exc:
+                self._json(
+                    400,
+                    {"error": "origin_policy", "message": str(exc)},
+                )
+            except OriginUnavailable as exc:
+                self._json(
+                    503,
+                    {"error": "origin_unavailable", "message": str(exc)},
+                )
+            except QuorumError as exc:
+                self._json(
+                    503,
+                    {"error": "quorum_unavailable", "message": str(exc)},
+                )
+            except (ValueError, TypeError) as exc:
+                self._json(400, {"error": "invalid_request", "message": str(exc)})
+            return
         key = self._key_from(path, "/v1/lease/")
         if key is not None:
             if not self._authorized("read", (key,)):
@@ -315,11 +379,18 @@ class MegaCacheHandler(BaseHTTPRequestHandler):
 
     def _operation_name(self) -> str:
         path = urlsplit(self.path).path
-        if path in ("/healthz", "/readyz", "/metrics", "/v1/stats"):
+        if path in (
+            "/healthz",
+            "/readyz",
+            "/metrics",
+            "/v1/stats",
+            "/v1/origins",
+        ):
             return "{} {}".format(self.command, path)
         for prefix, route in (
             ("/v1/cache/", "/v1/cache/{key}"),
             ("/v1/lease/", "/v1/lease/{key}"),
+            ("/v1/fetch/", "/v1/fetch/{key}"),
         ):
             if path.startswith(prefix):
                 return "{} {}".format(self.command, route)

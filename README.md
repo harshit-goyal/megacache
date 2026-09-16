@@ -9,9 +9,10 @@ lease-protected refreshes, tag invalidation, bounded memory, and useful
 operational metrics. Clients can use either Redis-compatible RESP2 commands or
 the HTTP API.
 
-> MegaCache is an alpha release. Version 0.5 adds a deterministic, testable
-> in-process cluster coordinator. It does not yet include authenticated
-> node-to-node RPC, so separately deployed processes do not form a cluster.
+> MegaCache is an alpha release. Version 0.6 adds protected read-through HTTP
+> origins, automated refresh, resilience policies, and origin observability.
+> Cluster coordination remains in-process: separately deployed processes do
+> not form a cluster.
 
 ## Why MegaCache?
 
@@ -37,6 +38,12 @@ related keys stale. MegaCache makes the safe path explicit:
   logical node failure and topology changes deterministic.
 - **Checksummed snapshots with bounded chunks** bootstrap replicas without
   publishing partially transferred ownership.
+- **Declarative HTTP origins** provide SSRF-safe read-through fetching without
+  accepting arbitrary URLs.
+- **Bounded origin work** combines coordinator-wide singleflight, refresh
+  workers, concurrency and queue limits, retry budgets, and circuit breakers.
+- **Freshness policies** support refresh-ahead, stale-while-revalidate,
+  stale-if-error, and negative caching.
 - **Zero runtime dependencies** keeps deployment and auditing simple.
 
 ## Quick start
@@ -58,6 +65,7 @@ mc ping
 mc put product:123 '{"id":123,"name":"Desk"}' \
   --ttl 300 --stale 900 --tag product:123 --tag catalog
 mc get product:123
+mc fetch product:123 catalog /v1/products/123
 mc ttl product:123
 mc invalidate catalog
 mc topology
@@ -151,6 +159,11 @@ This prevents a cache stampede without trusting a client-side distributed lock.
 | `MEGACACHE_SNAPSHOT_CHUNK_BYTES` | `262144` | Maximum transfer chunk |
 | `MEGACACHE_SNAPSHOT_MAX_IN_FLIGHT` | `2` | Unacknowledged chunk limit |
 | `MEGACACHE_MAX_RETAINED_TOMBSTONES` | `10000` | Backpressure limit for deletes awaiting unavailable replicas |
+| `MEGACACHE_ORIGINS_FILE` | unset | JSON file containing declarative HTTP origins |
+| `MEGACACHE_ORIGIN_WORKER_THREADS` | `2` | Background refresh worker count |
+| `MEGACACHE_ORIGIN_REFRESH_QUEUE_SIZE` | `1000` | Bounded background refresh queue |
+| `MEGACACHE_ORIGIN_GLOBAL_MAX_CONCURRENCY` | `64` | Process-wide active origin-request limit |
+| `MEGACACHE_ORIGIN_GLOBAL_MAX_QUEUE` | `256` | Process-wide waiting origin-request limit |
 
 The native client also reads `MEGACACHE_CLI_HOST`,
 `MEGACACHE_CLI_PORT`, `MEGACACHE_CLI_USERNAME`,
@@ -163,11 +176,20 @@ legacy administrator access. Health and metrics endpoints remain public so
 infrastructure probes can reach them; restrict `/metrics` at the network or
 reverse-proxy layer.
 
+To enable read-through fetching, copy `origins.example.json`, replace its
+authority and policy, and set `MEGACACHE_ORIGINS_FILE`. Every origin requires
+exact host, port, and path-prefix allowlists. Non-public, multicast,
+reserved, NAT64, IPv4-mapped/translatable, and transition addresses are
+rejected unless covered by an explicit `allowed_ip_networks` CIDR; embedded
+IPv4 addresses follow the same policy. `mc fetch` accepts only a configured
+origin name and an allowed absolute path—not a URL.
+
 ## Documentation
 
 - [Command reference](docs/commands.md)
 - [RESP2 and Redis command reference](docs/resp.md)
 - [HTTP API](docs/api.md)
+- [HTTP origin configuration](docs/origins.md)
 - [Architecture and guarantees](docs/architecture.md)
 - [Operations and deployment](docs/operations.md)
 - [Implementation roadmap](docs/roadmap.md)
@@ -176,10 +198,10 @@ reverse-proxy layer.
 
 ## Roadmap
 
-Phase 1 production foundations are available in version 0.4. Version 0.5
-delivers the Phase 2 storage and in-process cluster coordination interfaces.
+Phase 1 production foundations are available in version 0.4, Phase 2
+coordinator behavior in 0.5, and Phase 3 HTTP origin protection in 0.6.
 Secure inter-process transport remains a documented boundary rather than a
-simulated guarantee. Origin protection, freshness automation, SDKs, cache
+simulated guarantee. Change-stream freshness automation, SDKs, cache
 intelligence, and the managed control plane remain on the
 [implementation roadmap](docs/roadmap.md).
 

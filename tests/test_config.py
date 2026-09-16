@@ -62,6 +62,26 @@ class ConfigTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "finite"):
                     Config.from_env()
 
+    def test_origin_environment_is_parsed(self):
+        with patch.dict(
+            os.environ,
+            {
+                "MEGACACHE_NODE_ID": "node-a",
+                "MEGACACHE_ORIGINS_FILE": "origins.json",
+                "MEGACACHE_ORIGIN_WORKER_THREADS": "3",
+                "MEGACACHE_ORIGIN_REFRESH_QUEUE_SIZE": "40",
+                "MEGACACHE_ORIGIN_GLOBAL_MAX_CONCURRENCY": "12",
+                "MEGACACHE_ORIGIN_GLOBAL_MAX_QUEUE": "0",
+            },
+            clear=True,
+        ):
+            config = Config.from_env()
+        self.assertEqual("origins.json", config.origins_file)
+        self.assertEqual(3, config.origin_worker_threads)
+        self.assertEqual(40, config.origin_refresh_queue_size)
+        self.assertEqual(12, config.origin_global_max_concurrency)
+        self.assertEqual(0, config.origin_global_max_queue)
+
 
 if __name__ == "__main__":
     unittest.main()

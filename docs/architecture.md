@@ -14,6 +14,13 @@ construct and call it exactly as in version 0.4. Portable `StorageEntry`
 snapshots allow cluster coordination without protocol adapters reaching into
 engine internals.
 
+When `MEGACACHE_ORIGINS_FILE` is configured, `OriginCache` wraps the selected
+storage backend. It delegates the version 0.5 storage API unchanged and adds
+read-through `fetch`, origin health, bounded refresh workers, and labeled
+origin metrics. Origin values carry internal lineage metadata so reusing one
+cache key with a different origin path cannot return the earlier path's value;
+ordinary HTTP and RESP cache reads receive only the original body.
+
 ## Distributed coordination
 
 `ClusterStorage` is a well-defined in-process coordinator. Every node has a
@@ -108,6 +115,49 @@ restart. `SET ... EX`, `EXPIRE`, and MegaCache `MC.SET` create deadlines.
 RESP clients may pipeline commands. MegaCache reads and executes them in
 connection order and returns responses in that same order.
 
+## HTTP origin protection
+
+Origins are startup-loaded declarations, not client-supplied URLs. Each
+definition fixes one `http` or `https` authority and must explicitly allow the
+exact hostname, port, and one or more normalized path prefixes. Fetch requests
+accept only an absolute path. MegaCache rejects schemes, authorities, userinfo,
+fragments, dot segments, backslashes, encoded slashes, and paths outside the
+allowlist.
+
+The resolver runs for every origin attempt. Every returned address must be
+ordinary global unicast or fall inside an explicit `allowed_ip_networks` CIDR.
+Special-use and IPv4 transition addresses are denied by default, and embedded
+IPv4 addresses receive the same validation; mixed safe and unsafe DNS answers
+are rejected. The connection is pinned to a validated address, while HTTPS
+certificate and SNI validation continue to use
+the declared hostname. Redirects are not followed, proxy environment variables
+are ignored, fixed headers cannot replace framing or authority headers, and
+response bytes are bounded. These controls prevent MegaCache from becoming a
+general URL fetcher. Private origins are supported only by deliberately
+allowlisting their network ranges.
+
+Each origin has an independent concurrency limit and bounded wait budget.
+A process-wide concurrency and queue budget provides a second admission layer.
+Full or timed-out queues shed load rather than creating threads or origin work
+without bound. Socket timeouts and maximum response sizes bound admitted work.
+
+Retryable transport failures and selected transient HTTP statuses use
+exponential backoff with bounded jitter. Every retry consumes a token from a
+per-origin refillable budget; initial attempts do not. Circuit breakers have
+explicit `closed`, `open`, and `half_open` states. Consecutive failures open the
+breaker, open circuits reject immediately, and a bounded half-open probe closes
+or reopens it.
+
+Positive responses use the origin TTL followed by stale-while-revalidate and
+stale-if-error windows. Near-expiry reads enqueue refresh-ahead work. Reads in
+the SWR window return immediately and enqueue one refresh. Reads in the
+stale-if-error-only window attempt a synchronous refresh and return stale only
+when that protected attempt fails. Configured negative 4xx statuses are cached
+for a separate short TTL and appear as misses to ordinary `GET`.
+Every admitted origin load also holds a forced backend refresh lease. Deletes,
+invalidations, manual writes, and competing lease holders cancel or supersede
+that ownership, so a late origin response cannot resurrect an invalidated key.
+
 ## Transport and authorization
 
 When a certificate and key are configured, one TLS 1.2-or-newer context wraps
@@ -123,7 +173,9 @@ The legacy API key authenticates an unrestricted administrator for migration.
 ## Observability
 
 HTTP routes and RESP command names are recorded as bounded operation labels.
-The engine exports request counts and Prometheus latency histograms. Logs are
+The engine exports request counts and Prometheus latency histograms. Origin
+metrics include request outcomes, retries, load shedding, breaker transitions,
+current breaker state, active concurrency, and queue depth. Logs are
 JSON by default and include protocol, operation, status, duration, remote
 address, and authenticated username without recording keys, values, passwords,
 or command arguments.
@@ -141,6 +193,12 @@ stale value and a refresh token as `stale_lease`; concurrent clients continue
 receiving the stale value without blocking. A missing key gives one client a
 lease while followers receive a retry interval.
 
+`OriginCache.fetch` uses the backend's coordination table. With
+`ClusterStorage`, every logical node and every `OriginCache` facade sharing that
+coordinator observe one flight per origin/key/path. This is cluster-wide only inside
+the current in-process `ClusterStorage` coordinator boundary. Independently
+deployed processes have independent flights and can each contact the origin.
+
 ## Guarantees
 
 - Engine methods are thread-safe.
@@ -150,10 +208,14 @@ lease while followers receive a retry interval.
 - RESP reads of HTTP-created structured values return compact JSON.
 - HTTP reads of RESP-created binary values return a base64-marked object.
 - Loader failures are propagated and do not produce success-shaped entries.
+- Origin work is bounded by global and per-origin concurrency and queue limits.
+- Stale-if-error never extends beyond the configured stored stale deadline.
+- Origin redirects are never followed and arbitrary destination URLs are never
+  accepted.
 
 ## Explicit non-guarantees
 
-Version 0.5 does not ship a node discovery service or authenticated,
+Version 0.6 does not ship a node discovery service or authenticated,
 encrypted node-to-node RPC transport. `MEGACACHE_CLUSTER_NODES` creates
 multiple logical stores inside one process; loss of that process loses every
 logical node and all cache data. The coordinator interfaces can model missing
@@ -165,6 +227,10 @@ the in-process tests.
 Entries are not persisted. Restarting the process empties the cache. Use the
 coordinator as an embedded/testable distributed state machine until a secure
 transport implements the same interfaces.
+
+HTTP origin definitions are loaded only at startup. Version 0.6 has no database
+origin adapter and no credential-refresh mechanism for fixed origin headers.
+Refresh workers and singleflight state are in-process and are lost at restart.
 
 Clients remain responsible for deciding whether stale data is safe for their
 domain. Never cache authorization decisions, secrets, or correctness-critical

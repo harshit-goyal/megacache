@@ -18,11 +18,27 @@ from .cluster import (
     SnapshotSession,
 )
 from .engine import CacheEngine, CacheResult
+from .origin import (
+    BreakerState,
+    CircuitOpen,
+    HTTPOrigin,
+    OriginCache,
+    OriginError,
+    OriginFetchResult,
+    OriginOverloaded,
+    OriginPolicyError,
+    OriginResponse,
+    OriginUnavailable,
+    load_origin_definitions,
+    validate_origin_path,
+)
 from .storage import StorageBackend, StorageEntry
 
 __all__ = [
     "CacheEngine",
     "CacheResult",
+    "BreakerState",
+    "CircuitOpen",
     "ClusterNode",
     "ClusterStorage",
     "ConsistencyProfile",
@@ -30,6 +46,14 @@ __all__ = [
     "FenceError",
     "FenceToken",
     "NodeIdentity",
+    "HTTPOrigin",
+    "OriginCache",
+    "OriginError",
+    "OriginFetchResult",
+    "OriginOverloaded",
+    "OriginPolicyError",
+    "OriginResponse",
+    "OriginUnavailable",
     "QuorumError",
     "RebalanceError",
     "RebalancePlan",
@@ -40,5 +64,7 @@ __all__ = [
     "SnapshotSession",
     "StorageBackend",
     "StorageEntry",
+    "load_origin_definitions",
+    "validate_origin_path",
 ]
-__version__ = "0.5.0"
+__version__ = "0.6.0"

@@ -42,7 +42,7 @@ class _Lease:
 class _Flight:
     def __init__(self) -> None:
         self.event = threading.Event()
-        self.result: Optional[CacheResult] = None
+        self.result: Any = None
         self.error: Optional[BaseException] = None
 
 
@@ -105,6 +105,7 @@ class CacheEngine:
         self._tags: Dict[str, set] = defaultdict(set)
         self._leases: Dict[str, _Lease] = {}
         self._flights: Dict[str, _Flight] = {}
+        self._coordination_flights: Dict[str, _Flight] = {}
         self._metrics: Dict[str, int] = defaultdict(int)
         self._request_counts: Dict[Tuple[str, str, str], int] = defaultdict(int)
         self._latency_counts: Dict[Tuple[str, str, float], int] = defaultdict(int)
@@ -555,17 +556,22 @@ class CacheEngine:
             keys = set()
             for tag in normalized:
                 keys.update(self._tags.get(tag, set()))
-            removed = sum(1 for key in keys if self._remove_entry(key))
+            removed = 0
+            for key in keys:
+                removed += int(self._remove_entry(key))
+                self._remove_lease(key)
             self._metrics["invalidations_total"] += removed
             return removed
 
-    def acquire_lease(self, key: str) -> CacheResult:
+    def acquire_lease(self, key: str, force: bool = False) -> CacheResult:
         self._validate_key(key)
+        if not isinstance(force, bool):
+            raise ValueError("force must be a boolean")
         now = self._clock()
         with self._lock:
             self._purge_expired_leases(now)
             cached = self._lookup(key, count=True)
-            if cached.state == "fresh":
+            if cached.state == "fresh" and not force:
                 return cached
 
             lease = self._leases.get(key)
@@ -611,6 +617,34 @@ class CacheEngine:
                 expires_in_seconds=self._lease_seconds,
             )
 
+    def release_lease(self, key: str, lease_token: str) -> bool:
+        self._validate_key(key)
+        if not isinstance(lease_token, str):
+            raise ValueError("lease token must be a string")
+        with self._lock:
+            lease = self._leases.get(key)
+            if lease is None or not secrets.compare_digest(
+                lease.token, lease_token
+            ):
+                return False
+            return self._remove_lease(key)
+
+    def renew_lease(self, key: str, lease_token: str) -> bool:
+        self._validate_key(key)
+        if not isinstance(lease_token, str):
+            raise ValueError("lease token must be a string")
+        now = self._clock()
+        with self._lock:
+            lease = self._leases.get(key)
+            if lease is None or lease.until <= now:
+                self._remove_lease(key)
+                return False
+            if not secrets.compare_digest(lease.token, lease_token):
+                return False
+            lease.until = now + self._lease_seconds
+            self._metrics["lease_renewals_total"] += 1
+            return True
+
     def get_or_load(
         self,
         key: str,
@@ -655,6 +689,34 @@ class CacheEngine:
         finally:
             with self._lock:
                 self._flights.pop(key, None)
+                flight.event.set()
+
+    def coordinate(self, key: str, loader: Callable[[], Any]) -> Any:
+        """Run one operation per coordination key while followers wait."""
+        self._validate_key(key)
+        with self._lock:
+            flight = self._coordination_flights.get(key)
+            leader = flight is None
+            if leader:
+                flight = _Flight()
+                self._coordination_flights[key] = flight
+            else:
+                self._metrics["coalesced_total"] += 1
+        assert flight is not None
+        if not leader:
+            flight.event.wait()
+            if flight.error is not None:
+                raise flight.error
+            return flight.result
+        try:
+            flight.result = loader()
+            return flight.result
+        except BaseException as exc:
+            flight.error = exc
+            raise
+        finally:
+            with self._lock:
+                self._coordination_flights.pop(key, None)
                 flight.event.set()
 
     def stats(self) -> Dict[str, int]:

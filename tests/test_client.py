@@ -7,6 +7,7 @@ from megacache.cli import run
 from megacache.client import MegaCacheClient, MegaCacheCommandError
 from megacache.config import Config
 from megacache.engine import CacheEngine
+from megacache.origin import HTTPOrigin, OriginCache, OriginResponse
 from megacache.resp import MegaCacheRespServer
 
 
@@ -32,7 +33,25 @@ class NativeClientTests(unittest.TestCase):
             users_file=None,
             log_format="text",
         )
-        cls.engine = CacheEngine(max_entries=100)
+        cls.engine = OriginCache(
+            CacheEngine(max_entries=100),
+            [
+                HTTPOrigin.from_dict(
+                    {
+                        "name": "catalog",
+                        "base_url": "https://origin.example",
+                        "allowed_hosts": ["origin.example"],
+                        "allowed_ports": [443],
+                        "allowed_path_prefixes": ["/v1/"],
+                        "retry_attempts": 0,
+                    }
+                )
+            ],
+            resolver=lambda host, port: ["93.184.216.34"],
+            transport=lambda origin, path, addresses: OriginResponse(
+                200, path.encode("utf-8")
+            ),
+        )
         cls.server = MegaCacheRespServer(("127.0.0.1", 0), config, cls.engine)
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
         cls.thread.start()
@@ -43,6 +62,7 @@ class NativeClientTests(unittest.TestCase):
         cls.server.shutdown()
         cls.server.server_close()
         cls.thread.join(timeout=1)
+        cls.engine.close(1)
 
     def setUp(self):
         self.engine.flush()
@@ -125,7 +145,38 @@ class NativeClientTests(unittest.TestCase):
         with redirect_stdout(output), self.assertRaises(SystemExit) as exit_status:
             run(["--version"])
         self.assertEqual(0, exit_status.exception.code)
-        self.assertEqual("MegaCache 0.5.0", output.getvalue().strip())
+        self.assertEqual("MegaCache 0.6.0", output.getvalue().strip())
+
+    def test_native_cli_fetches_only_from_a_named_origin(self):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = run(
+                [
+                    "--port",
+                    str(self.port),
+                    "--password",
+                    "secret",
+                    "--json",
+                    "fetch",
+                    "product:1",
+                    "catalog",
+                    "/v1/product/1",
+                ]
+            )
+        self.assertEqual(0, code)
+        document = __import__("json").loads(output.getvalue())
+        self.assertEqual("refreshed", document["state"])
+        self.assertEqual("/v1/product/1", document["value"])
+        with MegaCacheClient(
+            port=self.port, password="secret"
+        ) as client:
+            self.assertEqual(
+                b"/v1/product/1", client.command("GET", "product:1")
+            )
+            self.assertEqual(
+                [b"/v1/product/1"],
+                client.command("MGET", "product:1"),
+            )
 
     def test_native_cli_topology_and_status(self):
         connection = [
