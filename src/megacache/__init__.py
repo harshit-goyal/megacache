@@ -18,6 +18,18 @@ from .cluster import (
     SnapshotSession,
 )
 from .engine import CacheEngine, CacheResult
+from .client import (
+    CachePolicy,
+    CachedValue,
+    FetchResult,
+    LeaseResult,
+    LocalCache,
+    MegaCacheClient,
+    MegaCacheClientError,
+    MegaCacheCommandError,
+    MegaCacheConnectionError,
+    MegaCacheProtocolError,
+)
 from .events import (
     AtomicCheckpointStore,
     ChangeEvent,
@@ -71,6 +83,16 @@ from .storage import StorageBackend, StorageEntry
 __all__ = [
     "CacheEngine",
     "CacheResult",
+    "CachePolicy",
+    "CachedValue",
+    "FetchResult",
+    "LeaseResult",
+    "LocalCache",
+    "MegaCacheClient",
+    "MegaCacheClientError",
+    "MegaCacheCommandError",
+    "MegaCacheConnectionError",
+    "MegaCacheProtocolError",
     "AtomicCheckpointStore",
     "BreakerState",
     "CircuitOpen",
@@ -133,4 +155,4 @@ __all__ = [
     "webhook_signature_payload",
     "validate_origin_path",
 ]
-__version__ = "0.7.0"
+__version__ = "0.8.0"

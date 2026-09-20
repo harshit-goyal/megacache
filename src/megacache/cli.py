@@ -16,6 +16,7 @@ from .auth import hash_password, write_example_users_file
 from .client import MegaCacheClient, MegaCacheClientError
 from .cluster import ClusterNode, ClusterStorage
 from .config import Config
+from .coordination import MutationClock
 from .engine import CacheEngine
 from .events import load_event_automation
 from .observability import configure_logging
@@ -31,7 +32,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Run and interact with MegaCache.",
     )
     parser.add_argument(
-        "--version", action="version", version="MegaCache 0.7.0"
+        "--version", action="version", version="MegaCache 0.8.0"
     )
     parser.add_argument(
         "--host",
@@ -340,7 +341,7 @@ def _serve(args: argparse.Namespace) -> int:
         )
         for node_id in config.cluster_nodes
     ]
-    engine = ClusterStorage(
+    engine = MutationClock(ClusterStorage(
         nodes,
         replica_count=config.replica_count,
         virtual_nodes=config.virtual_nodes,
@@ -353,7 +354,7 @@ def _serve(args: argparse.Namespace) -> int:
         max_leases=config.max_entries,
         max_lease_memory_bytes=config.max_memory_bytes,
         max_retained_tombstones=config.max_retained_tombstones,
-    )
+    ))
     if config.origins_file is not None:
         engine = OriginCache.from_file(
             engine,

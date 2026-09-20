@@ -65,9 +65,11 @@ class ServerTests(unittest.TestCase):
         cls.thread.join(timeout=1)
         cls.engine.close(1)
 
-    def request(self, method, path, body=None, authenticated=True):
+    def request(
+        self, method, path, body=None, authenticated=True, extra_headers=None
+    ):
         connection = HTTPConnection("127.0.0.1", self.port, timeout=2)
-        headers = {}
+        headers = dict(extra_headers or {})
         if authenticated:
             headers["Authorization"] = "Bearer secret"
         if body is not None:
@@ -122,6 +124,16 @@ class ServerTests(unittest.TestCase):
         )
         self.assertEqual(200, status)
         self.assertEqual("ok", payload["status"])
+
+    def test_fetch_rejects_invalid_traceparent(self):
+        status, payload = self.request(
+            "POST",
+            "/v1/fetch/trace",
+            {"origin": "catalog", "path": "/v1/trace"},
+            extra_headers={"traceparent": "not-a-traceparent"},
+        )
+        self.assertEqual(400, status)
+        self.assertEqual("invalid_request", payload["error"])
 
     def test_empty_key_returns_validation_error(self):
         status, payload = self.request("GET", "/v1/cache/")

@@ -21,3 +21,31 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: python -m pip install .
       - run: python -m unittest discover -s tests -v
+      - run: python conformance/run.py --sdk python
+
+  sdk-conformance:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        sdk: [node, go, java]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+      - uses: actions/setup-node@v4
+        if: matrix.sdk == 'node'
+        with:
+          node-version: "20"
+      - uses: actions/setup-go@v5
+        if: matrix.sdk == 'go'
+        with:
+          go-version: "1.20"
+      - uses: actions/setup-java@v4
+        if: matrix.sdk == 'java'
+        with:
+          distribution: temurin
+          java-version: "11"
+      - run: cd sdk/go && go test -race ./...
+        if: matrix.sdk == 'go'
+      - run: python conformance/run.py --sdk ${{ matrix.sdk }}

@@ -3,6 +3,7 @@
 import datetime
 import json
 import logging
+import re
 from typing import Any, Dict
 
 _EXTRA_FIELDS = (
@@ -12,10 +13,20 @@ _EXTRA_FIELDS = (
     "duration_ms",
     "remote",
     "username",
+    "traceparent",
     "event_source",
     "event_stream",
     "event_outcome",
 )
+_TRACEPARENT_RE = re.compile(
+    r"^(?!ff)[0-9a-f]{2}-(?!0{32})[0-9a-f]{32}-(?!0{16})[0-9a-f]{16}-[0-9a-f]{2}$"
+)
+
+
+def valid_traceparent(value: str) -> bool:
+    """Return whether *value* is a canonical W3C traceparent header."""
+
+    return bool(_TRACEPARENT_RE.fullmatch(value))
 
 
 class JsonFormatter(logging.Formatter):

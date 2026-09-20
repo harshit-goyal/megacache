@@ -137,7 +137,7 @@ Tests cover restart resume, duplicates, replay and out-of-order input, webhook
 authentication/replay, schema compatibility and migrations, dependency graph
 bounds, connector record mapping, and dead-letter retry metadata.
 
-## Phase 5: developer platform
+## Phase 5: developer platform — complete in 0.8
 
 Deliverables:
 
@@ -154,6 +154,23 @@ Acceptance criteria:
 - SDK behavior matches the protocol conformance suite.
 - L1 invalidation reaches healthy clients within a documented bound.
 - Trace context follows client, MegaCache, and origin operations.
+
+Version 0.8 ships dependency-free Python 3.9+, Node.js 18+, Go 1.20+, and Java
+11+ SDKs. Their common surface covers RESP2 string operations and native
+fetch, lease, invalidate, status, invalidation-cursor, and trace-context
+commands. Each SDK has bounded entry/byte L1 storage, per-key in-process
+coalescing, stale-if-error, and distributed lease completion.
+
+Active clients poll `MC.INVALIDATIONS` before an L1 read once the configured
+interval has elapsed and clear L1 when the monotonic server mutation cursor
+changes. The next-read bound is the default one-second interval plus one
+successful network round trip; applications may lower the interval or
+explicitly invalidate after local writes. This deliberately bounded,
+metadata-free mechanism favors correctness over selective eviction.
+
+The shared conformance runner starts a real server and exercises every SDK.
+W3C `traceparent` is accepted without an OpenTelemetry dependency, attached to
+server observations, and forwarded to configured HTTP origins.
 
 ## Phase 6: cache intelligence
 

@@ -17,7 +17,7 @@ behind appropriate network controls; use a TCP TLS proxy for RESP when traffic
 crosses a trusted boundary. The process runs as an unprivileged user in the
 supplied container, logs requests to standard output, and shuts down cleanly.
 
-Version 0.7's cluster is in-process. A comma-separated
+Version 0.8's cluster is in-process. A comma-separated
 `MEGACACHE_CLUSTER_NODES` value creates independent logical storage nodes
 managed by one coordinator. This is useful for embedded operation, exercising
 replication behavior, and validating failure procedures, but it is not a
@@ -212,13 +212,13 @@ Snapshot sessions enforce
 `MEGACACHE_SNAPSHOT_CHUNK_BYTES`, and
 `MEGACACHE_SNAPSHOT_MAX_IN_FLIGHT`.
 
-There is no native node RPC in 0.7. Real packet loss, asymmetric partitions,
+There is no native node RPC in 0.8. Real packet loss, asymmetric partitions,
 cross-host clocks, and process split brain are outside implemented behavior.
 
 Treat MegaCache as optional infrastructure. Clients should enforce short
 timeouts and fall back to the authoritative origin when it is unavailable.
 Rate-limit that fallback to avoid transferring a cache outage to the origin.
 
-Because version 0.7 cache entries are in-memory, rolling restarts begin cold. Warm critical
+Because version 0.8 cache entries are in-memory, rolling restarts begin cold. Warm critical
 keys gradually with `mc fetch`; the same admission and origin protection
 policies apply to warming.

@@ -83,6 +83,26 @@ class OriginTests(unittest.TestCase):
         origins = load_origin_definitions("origins.example.json")
         self.assertEqual(("catalog",), tuple(item.name for item in origins))
 
+    def test_traceparent_is_forwarded_to_header_aware_transport(self):
+        captured = []
+
+        def transport(origin, path, addresses, headers):
+            captured.append(headers)
+            return OriginResponse(200, b"value")
+
+        service = self.service(CacheEngine(clock=self.clock), make_origin(), transport)
+        traceparent = (
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-"
+            "00f067aa0ba902b7-01"
+        )
+        service.fetch(
+            "product:trace",
+            "catalog",
+            "/v1/product/trace",
+            traceparent=traceparent,
+        )
+        self.assertEqual(traceparent, captured[0]["traceparent"])
+
     def test_concurrent_miss_is_coalesced_across_one_cluster_coordinator(self):
         cluster = ClusterStorage(
             [
@@ -162,6 +182,30 @@ class OriginTests(unittest.TestCase):
         self.assertEqual("stale_if_error", fallback.state)
         self.assertEqual(b"new", fallback.value)
         self.clock.advance(10)
+        with self.assertRaises(OriginUnavailable):
+            service.fetch("key", "catalog", "/v1/key")
+
+    def test_stale_if_error_reloads_entry_after_failed_origin_request(self):
+        responses = [OriginResponse(200, b"value")]
+
+        def transport(origin, path, addresses):
+            if responses:
+                return responses.pop()
+            self.clock.advance(2)
+            raise OSError("down")
+
+        service = self.service(
+            CacheEngine(clock=self.clock),
+            make_origin(
+                ttl_seconds=1,
+                stale_while_revalidate_seconds=0,
+                stale_if_error_seconds=1,
+                refresh_ahead_seconds=0,
+            ),
+            transport,
+        )
+        service.fetch("key", "catalog", "/v1/key")
+        self.clock.advance(1.1)
         with self.assertRaises(OriginUnavailable):
             service.fetch("key", "catalog", "/v1/key")
 

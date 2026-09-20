@@ -444,6 +444,6 @@ python3 -m pip wheel --no-deps --wheel-dir dist .
 Install the generated wheel:
 
 ```bash
-python3 -m pip install dist/megacache-0.7.0-py3-none-any.whl
+python3 -m pip install dist/megacache-0.8.0-py3-none-any.whl
 mc
 ```

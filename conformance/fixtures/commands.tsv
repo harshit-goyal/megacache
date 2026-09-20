@@ -1,0 +1,11 @@
+# language-neutral Phase 5 conformance values
+key	conformance:key
+value	conformance-value
+second_key	conformance:second
+second_value	second-value
+tag	conformance-tag
+fetch_key	conformance:fetch
+origin	catalog
+path	/v1/conformance
+l1_key	conformance:l1
+traceparent	00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01

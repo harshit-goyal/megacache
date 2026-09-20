@@ -865,6 +865,9 @@ class CacheEngine:
                 state="fresh",
                 value=self._copy_value(entry.value),
                 expires_in_seconds=max(0, entry.fresh_until - now),
+                stale_for_seconds=max(
+                    0, entry.stale_until - entry.fresh_until
+                ),
             )
         if count:
             self._metrics["stale_hits_total"] += 1

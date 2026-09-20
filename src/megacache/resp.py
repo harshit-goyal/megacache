@@ -2,6 +2,8 @@
 
 import json
 import logging
+import math
+import secrets
 import socket
 import socketserver
 import time
@@ -12,10 +14,16 @@ from .config import Config
 from .engine import CacheResult
 from .events import EventBackpressure, EventError, EventIngestionDisabled
 from .origin import OriginError, OriginOverloaded
+from .observability import valid_traceparent
 from .storage import StorageBackend
 from .transport import TLSRequestMixin
 
 LOG = logging.getLogger("megacache.resp")
+_PROCESS_EPOCH = secrets.token_urlsafe(18)
+
+
+def _duration_milliseconds(value: float) -> int:
+    return -1 if not math.isfinite(value) else max(0, int(value * 1000))
 
 
 class RespCommandError(Exception):
@@ -38,6 +46,7 @@ class MegaCacheRespServer(TLSRequestMixin, socketserver.ThreadingTCPServer):
         self.initialize_transport()
         self.config = config
         self.engine = engine
+        self.invalidation_epoch = _PROCESS_EPOCH
         self.auth = AuthManager(config.api_key, config.users_file)
         super().__init__(address, MegaCacheRespHandler)
 
@@ -48,6 +57,8 @@ class MegaCacheRespHandler(socketserver.StreamRequestHandler):
         super().setup()
         self.request.settimeout(30)
         self.principal = self.server.auth.anonymous()
+        self.traceparent = None
+        self._command_traceparent = None
 
     def handle(self) -> None:
         while True:
@@ -85,6 +96,8 @@ class MegaCacheRespHandler(socketserver.StreamRequestHandler):
                 if started is not None:
                     self._observe(operation, started, False)
                 return
+            finally:
+                self._command_traceparent = None
 
     def _observe(self, operation: str, started: float, success: bool) -> None:
         duration = time.perf_counter() - started
@@ -101,6 +114,11 @@ class MegaCacheRespHandler(socketserver.StreamRequestHandler):
                 "remote": self.client_address[0],
                 "username": (
                     None if self.principal is None else self.principal.username
+                ),
+                "traceparent": (
+                    self._command_traceparent
+                    if self._command_traceparent is not None
+                    else self.traceparent
                 ),
             },
         )
@@ -141,6 +159,8 @@ class MegaCacheRespHandler(socketserver.StreamRequestHandler):
             "MC.EVENT",
             "MC.EVENT.STATUS",
             "MC.EVENT.RETRY",
+            "MC.INVALIDATIONS",
+            "MC.TRACEPARENT",
         }
         return command if command in supported else "UNKNOWN"
 
@@ -227,6 +247,8 @@ class MegaCacheRespHandler(socketserver.StreamRequestHandler):
             "MC.EVENT": self._mc_event,
             "MC.EVENT.STATUS": self._mc_event_status,
             "MC.EVENT.RETRY": self._mc_event_retry,
+            "MC.INVALIDATIONS": self._mc_invalidations,
+            "MC.TRACEPARENT": self._mc_traceparent,
         }
         if command == "QUIT":
             self._require_arity(args, 1)
@@ -383,7 +405,7 @@ class MegaCacheRespHandler(socketserver.StreamRequestHandler):
         lines = [
             "# Server",
             "redis_version:7.2.0",
-            "megacache_version:0.7.0",
+            "megacache_version:0.8.0",
             "redis_mode:standalone",
             "# Keyspace",
             "db0:keys={}".format(self.server.engine.size()),
@@ -421,7 +443,7 @@ class MegaCacheRespHandler(socketserver.StreamRequestHandler):
             b"server",
             b"megacache",
             b"version",
-            b"0.7.0",
+            b"0.8.0",
             b"proto",
             2,
             b"mode",
@@ -485,14 +507,33 @@ class MegaCacheRespHandler(socketserver.StreamRequestHandler):
         return _SimpleString("OK")
 
     def _mc_lease(self, args: Sequence[bytes]) -> List[Any]:
-        self._require_arity(args, 2)
+        if len(args) not in (2, 3):
+            raise RespCommandError(
+                "wrong number of arguments for 'mc.lease' command"
+            )
+        windows = len(args) == 3 and args[2].upper() == b"WINDOWS"
+        if len(args) == 3 and not windows:
+            raise RespCommandError("unknown MC.LEASE option")
         key = self._key(args[1])
         self._authorize("read", (key,))
         self._authorize("write", (key,))
         result = self.server.engine.acquire_lease(key)
         values: List[Any] = [result.state.encode("ascii")]
-        if result.state in ("fresh", "stale"):
+        if result.state == "fresh":
             values.append(self._value_bytes(result.value))
+            if windows:
+                values.extend(
+                    [
+                        _duration_milliseconds(result.expires_in_seconds),
+                        _duration_milliseconds(result.stale_for_seconds),
+                    ]
+                )
+        elif result.state == "stale":
+            values.append(self._value_bytes(result.value))
+            if windows:
+                values.append(
+                    _duration_milliseconds(result.stale_for_seconds)
+                )
         elif result.state == "stale_lease":
             values.extend(
                 [
@@ -500,6 +541,10 @@ class MegaCacheRespHandler(socketserver.StreamRequestHandler):
                     result.lease_token.encode("ascii"),
                 ]
             )
+            if windows:
+                values.append(
+                    _duration_milliseconds(result.stale_for_seconds)
+                )
         elif result.state == "lease":
             values.append(result.lease_token.encode("ascii"))
         elif result.state == "loading":
@@ -564,8 +609,52 @@ class MegaCacheRespHandler(socketserver.StreamRequestHandler):
         )
         return json.dumps(value, separators=(",", ":")).encode("utf-8")
 
+    def _mc_invalidations(self, args: Sequence[bytes]) -> bytes:
+        if len(args) not in (1, 2):
+            raise RespCommandError(
+                "wrong number of arguments for 'mc.invalidations' command"
+            )
+        self._authorize("read")
+        supplied = None
+        if len(args) == 2:
+            if len(args[1]) > 256:
+                raise RespCommandError("invalidation cursor is too long")
+            try:
+                supplied = args[1].decode("ascii")
+            except UnicodeDecodeError as exc:
+                raise RespCommandError(
+                    "invalidation cursor must be ASCII"
+                ) from exc
+        cursor_method = getattr(
+            self.server.engine, "invalidation_cursor", None
+        )
+        generation = 0 if cursor_method is None else int(cursor_method())
+        epoch = self.server.invalidation_epoch
+        cursor = "{}:{}".format(epoch, generation)
+        return json.dumps(
+            {
+                "cursor": cursor,
+                "epoch": epoch,
+                "generation": generation,
+                "changed": supplied is not None and cursor != supplied,
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+    def _mc_traceparent(self, args: Sequence[bytes]) -> _SimpleString:
+        self._require_arity(args, 2)
+        self._authorize("read")
+        try:
+            value = args[1].decode("ascii").lower()
+        except UnicodeDecodeError as exc:
+            raise RespCommandError("traceparent must be ASCII") from exc
+        if not valid_traceparent(value):
+            raise RespCommandError("invalid W3C traceparent")
+        self.traceparent = value
+        return _SimpleString("OK")
+
     def _mc_fetch(self, args: Sequence[bytes]) -> bytes:
-        if len(args) not in (4, 5):
+        if len(args) < 4:
             raise RespCommandError(
                 "wrong number of arguments for 'mc.fetch' command"
             )
@@ -585,13 +674,32 @@ class MegaCacheRespHandler(socketserver.StreamRequestHandler):
                 "origin name and path must be valid UTF-8"
             ) from exc
         force_refresh = False
-        if len(args) == 5:
-            if args[4].upper() != b"REFRESH":
+        traceparent = self.traceparent
+        index = 4
+        while index < len(args):
+            option = args[index].upper()
+            if option == b"REFRESH":
+                force_refresh = True
+                index += 1
+            elif option == b"TRACEPARENT" and index + 1 < len(args):
+                try:
+                    candidate = args[index + 1].decode("ascii").lower()
+                except UnicodeDecodeError as exc:
+                    raise RespCommandError("traceparent must be ASCII") from exc
+                if not valid_traceparent(candidate):
+                    raise RespCommandError("invalid W3C traceparent")
+                traceparent = candidate
+                index += 2
+            else:
                 raise RespCommandError("unknown MC.FETCH option")
-            force_refresh = True
+        self._command_traceparent = traceparent
         try:
             result = fetch(
-                key, origin, path, force_refresh=force_refresh
+                key,
+                origin,
+                path,
+                force_refresh=force_refresh,
+                traceparent=traceparent,
             )
         except OriginOverloaded as exc:
             raise RespCommandError("BUSY {}".format(exc)) from exc

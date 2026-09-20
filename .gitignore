@@ -12,3 +12,8 @@ events-state.json
 megacache-events-state.json
 build/
 dist/
+/sdk/java/target/
+/sdk/java/**/*.class
+/sdk/java/**/*.jar
+/sdk/node/node_modules/
+/sdk/node/*.tgz

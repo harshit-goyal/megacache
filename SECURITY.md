@@ -90,7 +90,7 @@ allowlists narrow, prefer TLS, use dedicated origin credentials with read-only
 scope, and restrict configuration-file permissions. Adding broad private
 network CIDRs materially expands what a compromised write-capable MegaCache
 client can reach. Origin definitions are loaded at startup, so restart after
-rotation. MegaCache 0.7 intentionally has no arbitrary URL mode.
+rotation. MegaCache 0.8 intentionally has no arbitrary URL mode.
 
 ## Event and webhook security
 
@@ -128,7 +128,7 @@ consumer-group or slot ownership, network allowlists, and driver updates.
 
 ## Cluster security boundary
 
-Version 0.7 provides an in-process cluster coordinator and no node-to-node
+Version 0.8 provides an in-process cluster coordinator and no node-to-node
 network listener. Logical node IDs in `MEGACACHE_CLUSTER_NODES` are local
 configuration, not authenticated identities. Do not expose or build an
 unauthenticated RPC shim around `ClusterStorage`.

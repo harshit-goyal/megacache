@@ -21,7 +21,9 @@ origin metrics. Origin values carry internal lineage metadata so reusing one
 cache key with a different origin path cannot return the earlier path's value;
 ordinary HTTP and RESP cache reads receive only the original body.
 
-`EventAutomation` is the outer storage facade in version 0.7. It preserves the
+`EventAutomation` is the outer storage facade when configured. Version 0.8
+places a `MutationClock` around the coordinator so SDKs can poll a bounded,
+metadata-free invalidation cursor. The event facade preserves the
 storage API and adds normalized event ingestion, webhook authentication,
 durable checkpoints, idempotency, dead letters, dependency traversal, and
 event metrics. It can wrap `OriginCache`, `ClusterStorage`, or `CacheEngine`.
@@ -257,7 +259,7 @@ deployed processes have independent flights and can each contact the origin.
 
 ## Explicit non-guarantees
 
-Version 0.7 does not ship a node discovery service or authenticated,
+Version 0.8 does not ship a node discovery service or authenticated,
 encrypted node-to-node RPC transport. `MEGACACHE_CLUSTER_NODES` creates
 multiple logical stores inside one process; loss of that process loses every
 logical node and all cache data. The coordinator interfaces can model missing
@@ -270,7 +272,7 @@ Entries are not persisted. Restarting the process empties the cache. Use the
 coordinator as an embedded/testable distributed state machine until a secure
 transport implements the same interfaces.
 
-HTTP origin and event definitions are loaded only at startup. Version 0.7 has
+HTTP origin and event definitions are loaded only at startup. Version 0.8 has
 no database or Kafka wire client and no credential-refresh mechanism for fixed
 origin headers or webhook secrets.
 Refresh workers and singleflight state are in-process and are lost at restart.

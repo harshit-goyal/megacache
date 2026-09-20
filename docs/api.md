@@ -1,5 +1,10 @@
 # HTTP API
 
+Clients may send a W3C `traceparent` header to `POST /v1/fetch/{key}`.
+MegaCache validates it, includes it in request observations, and forwards it
+to the configured HTTP origin. Invalid values return `400`. No tracing
+dependency is required.
+
 This document covers the HTTP protocol. For `redis-cli` and RESP2 clients, see
 the [RESP command reference](resp.md).
 

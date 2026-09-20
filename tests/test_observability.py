@@ -38,12 +38,17 @@ class ObservabilityTests(unittest.TestCase):
         record.protocol = "http"
         record.operation = "GET /healthz"
         record.status = 200
+        record.traceparent = (
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-"
+            "00f067aa0ba902b7-01"
+        )
         record.event_source = "catalog"
         record.event_outcome = "processed"
         document = json.loads(JsonFormatter().format(record))
         self.assertEqual("request", document["message"])
         self.assertEqual("http", document["protocol"])
         self.assertEqual(200, document["status"])
+        self.assertEqual(record.traceparent, document["traceparent"])
         self.assertEqual("catalog", document["event_source"])
         self.assertEqual("processed", document["event_outcome"])
 

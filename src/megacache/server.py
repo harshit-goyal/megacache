@@ -24,6 +24,7 @@ from .origin import (
     OriginPolicyError,
     OriginUnavailable,
 )
+from .observability import valid_traceparent
 from .storage import StorageBackend
 from .transport import TLSRequestMixin
 
@@ -47,6 +48,7 @@ class MegaCacheHandler(BaseHTTPRequestHandler):
     def handle_one_request(self) -> None:
         self._request_observed = False
         self._principal = None
+        self._traceparent = None
         super().handle_one_request()
 
     def do_GET(self) -> None:
@@ -303,11 +305,18 @@ class MegaCacheHandler(BaseHTTPRequestHandler):
                 refresh = body.get("refresh", False)
                 if not isinstance(refresh, bool):
                     raise ValueError("refresh must be a boolean")
+                traceparent = self.headers.get("traceparent")
+                if traceparent is not None:
+                    traceparent = traceparent.lower()
+                    if not valid_traceparent(traceparent):
+                        raise ValueError("traceparent must be a valid W3C value")
+                self._traceparent = traceparent
                 result = fetch(
                     key,
                     body["origin"],
                     body["path"],
                     force_refresh=refresh,
+                    traceparent=traceparent,
                 )
                 self._json(200, result.as_json())
             except OriginOverloaded as exc:
@@ -502,6 +511,7 @@ class MegaCacheHandler(BaseHTTPRequestHandler):
                     "username": getattr(
                         getattr(self, "_principal", None), "username", None
                     ),
+                    "traceparent": self._traceparent,
                 },
             )
         self.send_response(status)

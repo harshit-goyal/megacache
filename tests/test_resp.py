@@ -1,6 +1,8 @@
 import socket
 import threading
 import unittest
+import json
+import logging
 
 from megacache.config import Config
 from megacache.engine import CacheEngine
@@ -190,6 +192,58 @@ class RespServerTests(unittest.TestCase):
         status = self.client.command("MC.STATUS")
         self.assertIn(b'"healthy_nodes":1', status)
 
+    def test_invalidation_cursor_contains_process_epoch_and_generation(self):
+        self.authenticate()
+        document = json.loads(self.client.command("MC.INVALIDATIONS"))
+        self.assertIsInstance(document["epoch"], str)
+        self.assertTrue(document["epoch"])
+        self.assertEqual(0, document["generation"])
+        self.assertEqual(
+            "{}:0".format(document["epoch"]), document["cursor"]
+        )
+
+    def test_inline_fetch_traceparent_is_observed_and_command_scoped(self):
+        class FetchResult:
+            def as_json(self):
+                return {"state": "fresh", "origin": "catalog"}
+
+        default = (
+            "00-11111111111111111111111111111111-"
+            "1111111111111111-01"
+        )
+        inline = (
+            "00-22222222222222222222222222222222-"
+            "2222222222222222-01"
+        )
+        traces = []
+
+        def fetch(key, origin, path, **kwargs):
+            traces.append(kwargs["traceparent"])
+            return FetchResult()
+
+        self.engine.fetch = fetch
+        try:
+            self.authenticate()
+            self.assertEqual(
+                "OK", self.client.command("MC.TRACEPARENT", default)
+            )
+            with self.assertLogs("megacache.resp", logging.INFO) as captured:
+                self.client.command(
+                    "MC.FETCH", "key", "catalog", "/v1/key",
+                    "TRACEPARENT", inline,
+                )
+                self.client.command("PING")
+        finally:
+            del self.engine.fetch
+
+        self.assertEqual([inline], traces)
+        records = [
+            record for record in captured.records
+            if record.operation in ("MC.FETCH", "PING")
+        ]
+        self.assertEqual([inline, default], [
+            record.traceparent for record in records
+        ])
 
 if __name__ == "__main__":
     unittest.main()

@@ -5,3 +5,5 @@ include origins.example.json
 include events.example.json
 recursive-include docs *.md
 recursive-include tests *.py
+recursive-include sdk *.py *.js *.json *.ts *.go *.java *.xml *.md
+recursive-include conformance *.py *.tsv

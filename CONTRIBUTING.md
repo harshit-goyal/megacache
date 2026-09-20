@@ -3,7 +3,7 @@
 Thank you for improving MegaCache.
 
 1. Create a focused branch and keep changes scoped to one problem.
-2. Run `make test`.
+2. Run `make test` and, for SDK/protocol changes, `make conformance`.
 3. Update API or operations documentation when behavior changes.
 4. Open a pull request explaining the motivation, behavior, and compatibility
    impact.

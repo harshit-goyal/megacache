@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import http.client
+import inspect
 import base64
 import hashlib
 import ipaddress
@@ -636,7 +637,7 @@ class OriginCache:
         random_source: Callable[[], float] = random.random,
         resolver: Optional[Callable[[str, int], Sequence[str]]] = None,
         transport: Optional[
-            Callable[[HTTPOrigin, str, Sequence[str]], OriginResponse]
+            Callable[..., OriginResponse]
         ] = None,
     ) -> None:
         if worker_threads <= 0 or refresh_queue_size <= 0:
@@ -652,6 +653,7 @@ class OriginCache:
         self._random = random_source
         self._resolver = resolver or _resolve_addresses
         self._transport = transport or _http_transport
+        self._transport_accepts_headers = _accepts_headers(self._transport)
         self._runtimes = {
             origin.name: _OriginRuntime(origin, clock) for origin in normalized
         }
@@ -693,6 +695,7 @@ class OriginCache:
         path: str,
         *,
         force_refresh: bool = False,
+        traceparent: Optional[str] = None,
     ) -> OriginFetchResult:
         if self._closed.is_set():
             raise OriginUnavailable("origin service is shutting down")
@@ -744,16 +747,44 @@ class OriginCache:
                 "utf-8"
             )
         ).hexdigest()
-        return self._coordinate(
+        result = self._coordinate(
             coordination_key,
             runtime,
             lambda: self._leader_fetch(
                 key,
                 runtime,
                 request_path,
-                cached if cached.state == "stale" else None,
                 force_refresh,
+                traceparent,
             ),
+        )
+        if result.state != "stale_if_error":
+            return result
+        current, lineage_matches = _decode_cache_result(
+            self.storage.get(key), runtime.origin, request_path
+        )
+        if lineage_matches and current.state == "stale":
+            return OriginFetchResult(
+                state="stale_if_error",
+                origin=runtime.origin.name,
+                value=current.value,
+                error=result.error,
+            )
+        if lineage_matches and current.state == "fresh":
+            negative = _negative_value(current.value)
+            if negative is not None:
+                return OriginFetchResult(
+                    state="negative",
+                    origin=runtime.origin.name,
+                    status_code=negative,
+                )
+            return OriginFetchResult(
+                state="fresh",
+                origin=runtime.origin.name,
+                value=current.value,
+            )
+        raise OriginUnavailable(
+            result.error or "stale cache entry expired during origin failure"
         )
 
     def origins(self) -> Dict[str, Any]:
@@ -938,8 +969,8 @@ class OriginCache:
         key: str,
         runtime: _OriginRuntime,
         path: str,
-        stale: Optional[CacheResult],
         force_refresh: bool,
+        traceparent: Optional[str],
     ) -> OriginFetchResult:
         if not force_refresh:
             current = self.storage.get(key)
@@ -981,29 +1012,26 @@ class OriginCache:
         guard.start()
         try:
             try:
-                response, attempts = self._request_with_retries(runtime, path)
+                response, attempts = self._request_with_retries(
+                    runtime, path, traceparent
+                )
                 guard.ensure_owned()
             except OriginUnavailable as exc:
-                released = self.storage.release_lease(key, lease_token)
-                fallback = stale
-                if not released:
-                    current, lineage_matches = _decode_cache_result(
-                        self.storage.get(key), runtime.origin, path
-                    )
-                    fallback = (
-                        current
-                        if lineage_matches and current.state != "miss"
-                        else None
-                    )
-                if fallback is not None and fallback.state in ("fresh", "stale"):
-                    if fallback.state == "stale":
-                        runtime.increment("stale_if_error_total")
+                self.storage.release_lease(key, lease_token)
+                fallback, lineage_matches = _decode_cache_result(
+                    self.storage.get(key), runtime.origin, path
+                )
+                if lineage_matches and fallback.state == "fresh":
                     return OriginFetchResult(
-                        state=(
-                            "fresh"
-                            if fallback.state == "fresh"
-                            else "stale_if_error"
-                        ),
+                        state="fresh",
+                        origin=runtime.origin.name,
+                        value=fallback.value,
+                        error=str(exc),
+                    )
+                if lineage_matches and fallback.state == "stale":
+                    runtime.increment("stale_if_error_total")
+                    return OriginFetchResult(
+                        state="stale_if_error",
                         origin=runtime.origin.name,
                         value=fallback.value,
                         error=str(exc),
@@ -1075,7 +1103,10 @@ class OriginCache:
             raise
 
     def _request_with_retries(
-        self, runtime: _OriginRuntime, path: str
+        self,
+        runtime: _OriginRuntime,
+        path: str,
+        traceparent: Optional[str] = None,
     ) -> Tuple[OriginResponse, int]:
         origin = runtime.origin
         attempts = 0
@@ -1094,7 +1125,17 @@ class OriginCache:
                 runtime.admission.acquire(origin.queue_timeout_seconds)
                 acquired_origin = True
                 addresses = self._validated_addresses(origin)
-                response = self._transport(origin, path, addresses)
+                headers = (
+                    {}
+                    if traceparent is None
+                    else {"traceparent": traceparent}
+                )
+                if self._transport_accepts_headers:
+                    response = self._transport(
+                        origin, path, addresses, headers
+                    )
+                else:
+                    response = self._transport(origin, path, addresses)
                 if self._closed.is_set():
                     raise OriginUnavailable(
                         "origin service is shutting down"
@@ -1395,7 +1436,10 @@ def validate_origin_path(origin: HTTPOrigin, path: str) -> str:
 
 
 def _http_transport(
-    origin: HTTPOrigin, path: str, addresses: Sequence[str]
+    origin: HTTPOrigin,
+    path: str,
+    addresses: Sequence[str],
+    propagated_headers: Optional[Dict[str, str]] = None,
 ) -> OriginResponse:
     address = addresses[0]
     if origin.scheme == "https":
@@ -1415,7 +1459,9 @@ def _http_transport(
     headers = dict(origin.headers)
     headers["Host"] = origin.authority
     headers.setdefault("Accept-Encoding", "identity")
-    headers.setdefault("User-Agent", "MegaCache/0.6")
+    headers.setdefault("User-Agent", "MegaCache/0.8")
+    if propagated_headers:
+        headers.update(propagated_headers)
     try:
         connection.request("GET", path, headers=headers)
         response = connection.getresponse()
@@ -1425,6 +1471,26 @@ def _http_transport(
         return OriginResponse(response.status, body)
     finally:
         connection.close()
+
+
+def _accepts_headers(transport: Callable[..., OriginResponse]) -> bool:
+    try:
+        signature = inspect.signature(transport)
+    except (TypeError, ValueError):
+        return False
+    positional = [
+        parameter
+        for parameter in signature.parameters.values()
+        if parameter.kind
+        in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        )
+    ]
+    return len(positional) >= 4 or any(
+        parameter.kind is inspect.Parameter.VAR_POSITIONAL
+        for parameter in signature.parameters.values()
+    )
 
 
 class _PinnedHTTPConnection(http.client.HTTPConnection):

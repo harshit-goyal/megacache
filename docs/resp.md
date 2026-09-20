@@ -100,7 +100,7 @@ refresh only when the token is current and belongs to the same key.
 Reads a key and coordinates refresh ownership:
 
 ```text
-MC.LEASE key
+MC.LEASE key [WINDOWS]
 ```
 
 It returns a RESP array:
@@ -118,6 +118,11 @@ Example refresh completion:
 ```text
 MC.SET product:123 '{"id":123}' TTL 300 STALE 900 LEASE token-from-mc-lease
 ```
+
+The optional `WINDOWS` argument appends remaining fresh/stale milliseconds to
+the `fresh`, `stale`, and `stale_lease` responses. Version 0.8 SDKs use it to
+ensure an L1 entry never outlives its L2 freshness window. Omitting `WINDOWS`
+preserves the version 0.7 response shape.
 
 ### `MC.INVALIDATE`
 
@@ -161,6 +166,33 @@ owners. Administrator permission is required.
 
 Returns compact JSON with logical node health, ring version, total replication
 lag, known key count, and degraded state. Administrator permission is required.
+
+### `MC.INVALIDATIONS`
+
+Returns a restart-safe mutation cursor for bounded SDK L1 invalidation:
+
+```text
+MC.INVALIDATIONS [last-cursor]
+```
+
+The JSON response contains an opaque `cursor`, a per-process `epoch`, a
+monotonic `generation`, and `changed`. Read permission is required. SDKs send
+the opaque cursor back and clear their bounded L1 cache whenever either the
+epoch or generation changes.
+
+### `MC.TRACEPARENT`
+
+Sets the validated W3C `traceparent` associated with subsequent operations on
+the RESP connection:
+
+```text
+MC.TRACEPARENT 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
+```
+
+`MC.FETCH` also accepts command-scoped `TRACEPARENT value` directly. MegaCache
+records the context on that command and forwards it to HTTPS/HTTP origins
+without changing the connection default. This is a propagation hook; SDKs do
+not force an OpenTelemetry dependency.
 
 ### `MC.ORIGINS`
 

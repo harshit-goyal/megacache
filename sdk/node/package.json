@@ -1,0 +1,19 @@
+{
+  "name": "@megacache/client",
+  "version": "0.8.0",
+  "description": "Dependency-free RESP2 client and bounded L1 cache for MegaCache",
+  "main": "src/index.js",
+  "types": "src/index.d.ts",
+  "exports": {
+    ".": "./src/index.js",
+    "./integrations": "./src/integrations.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "keywords": ["cache", "resp2", "megacache"],
+  "license": "MIT"
+}

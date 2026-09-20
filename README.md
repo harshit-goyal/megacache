@@ -9,9 +9,10 @@ lease-protected refreshes, tag invalidation, bounded memory, and useful
 operational metrics. Clients can use either Redis-compatible RESP2 commands or
 the HTTP API.
 
-> MegaCache is an alpha release. Version 0.7 adds durable freshness-event
-> ingestion, authenticated webhooks, change-data-capture adapter interfaces,
-> schema-aware rolling invalidation, and bounded dependency propagation.
+> MegaCache is an alpha release. Version 0.8 adds supported dependency-free
+> Python, Node.js, Go, and Java SDKs, a shared conformance suite, bounded L1
+> caching with L2 lease coordination, invalidation polling, and W3C
+> `traceparent` propagation hooks.
 > Cluster coordination remains in-process: separately deployed processes do
 > not form a cluster.
 
@@ -51,6 +52,8 @@ related keys stale. MegaCache makes the safe path explicit:
   PostgreSQL, MySQL, and MongoDB adapters without pretending to bundle their
   network clients.
 - **Zero runtime dependencies** keeps deployment and auditing simple.
+- **Four supported SDKs** share RESP2 semantics, typed errors, bounded local
+  caches, request coalescing, and trace-context hooks.
 
 ## Quick start
 
@@ -113,6 +116,25 @@ For Docker:
 ```bash
 docker compose up --build
 ```
+
+## SDKs
+
+Supported clients live in [`sdk/`](sdk/README.md):
+
+```python
+from megacache import CachePolicy, MegaCacheClient
+
+with MegaCacheClient() as cache:
+    user = cache.get_or_load(
+        "user:42",
+        lambda: b'{"id":42}',
+        CachePolicy(ttl_seconds=60, stale_seconds=300, tags=("users",)),
+    )
+```
+
+Node.js 18+, Go 1.20+, and Java 11+ clients expose the same RESP2 and
+MegaCache operation set. Run all locally available conformance suites with
+`make conformance`.
 
 ## Safe refresh protocol
 
@@ -223,16 +245,18 @@ clients.
 - [Architecture and guarantees](docs/architecture.md)
 - [Operations and deployment](docs/operations.md)
 - [Implementation roadmap](docs/roadmap.md)
+- [SDKs and framework integrations](docs/sdks.md)
+- [Versioning policy](docs/versioning.md)
 - [Contributing](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)
 
 ## Roadmap
 
 Phase 1 production foundations are available in version 0.4, Phase 2
-coordinator behavior in 0.5, Phase 3 HTTP origin protection in 0.6, and Phase
-4 freshness automation in 0.7.
+coordinator behavior in 0.5, Phase 3 HTTP origin protection in 0.6, Phase 4
+freshness automation in 0.7, and Phase 5 developer tooling in 0.8.
 Secure inter-process transport remains a documented boundary rather than a
-simulated guarantee. SDKs, cache intelligence, and the managed control plane remain on the
+simulated guarantee. Cache intelligence and the managed control plane remain on the
 [implementation roadmap](docs/roadmap.md).
 
 ## License
