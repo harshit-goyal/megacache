@@ -11,6 +11,7 @@ import math
 import os
 import re
 import secrets
+import stat
 import threading
 import time
 from collections import Counter, defaultdict, deque
@@ -857,8 +858,14 @@ class AtomicCheckpointStore:
         if directory:
             os.makedirs(directory, mode=0o700, exist_ok=True)
         descriptor = os.open(
-            self.lock_path, os.O_RDWR | os.O_CREAT, 0o600
+            self.lock_path,
+            os.O_RDWR
+            | os.O_CREAT
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
         )
+        os.fchmod(descriptor, 0o600)
         try:
             fcntl.flock(
                 descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB
@@ -872,17 +879,28 @@ class AtomicCheckpointStore:
 
     def _load(self) -> Tuple[Dict[str, Any], bool]:
         try:
-            if os.path.getsize(self.path) > self.max_state_bytes:
+            metadata = os.lstat(self.path)
+            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(
+                metadata.st_mode
+            ):
+                raise EventError("event state must be a regular file")
+            if metadata.st_size > self.max_state_bytes:
                 raise EventBackpressure(
                     "existing event state exceeds configured byte limit"
                 )
-            with open(self.path, "r", encoding="utf-8") as source:
+            descriptor = os.open(
+                self.path,
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+            )
+            with os.fdopen(descriptor, "r", encoding="utf-8") as source:
                 state = json.load(source)
         except FileNotFoundError:
             return self._empty_state(), False
         except EventBackpressure:
             raise
-        except (OSError, json.JSONDecodeError) as exc:
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise EventError(
                 "unable to load event state '{}': {}".format(self.path, exc)
             ) from exc
@@ -989,7 +1007,13 @@ class AtomicCheckpointStore:
                 "event state exceeds configured byte limit"
             )
         descriptor = os.open(
-            temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+            temporary,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
         )
         try:
             with os.fdopen(descriptor, "wb") as destination:
@@ -1883,13 +1907,14 @@ def load_event_automation(
     graph_max_fanout: int = 100,
     graph_max_depth: int = 16,
     graph_max_invalidation_nodes: int = 10_000,
+    allowed_webhooks: Optional[Iterable[str]] = None,
 ) -> EventAutomation:
     document: Dict[str, Any] = {}
     if config_path is not None:
         try:
             with open(config_path, "r", encoding="utf-8") as source:
                 document = json.load(source)
-        except (OSError, json.JSONDecodeError) as exc:
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise EventError(
                 "unable to load MEGACACHE_EVENTS_FILE: {}".format(exc)
             ) from exc
@@ -1951,10 +1976,14 @@ def load_event_automation(
     raw_webhooks = document.get("webhooks", [])
     if not isinstance(raw_webhooks, list):
         raise EventError("webhooks must be an array")
+    allowed = None if allowed_webhooks is None else frozenset(allowed_webhooks)
     webhooks = []
     for value in raw_webhooks:
         if not isinstance(value, dict):
             raise EventError("each webhook must be an object")
+        name = value.get("name")
+        if allowed is not None and name not in allowed:
+            continue
         direct_secret = value.get("secret")
         secret_env = value.get("secret_env")
         if (direct_secret is None) == (secret_env is None):
@@ -1975,11 +2004,20 @@ def load_event_automation(
             raise EventError("webhook secret must be a string")
         webhooks.append(
             WebhookSource(
-                name=value.get("name"),
+                name=name,
                 secret=direct_secret.encode("utf-8"),
                 tolerance_seconds=value.get("tolerance_seconds", 300),
             )
         )
+    if allowed is not None:
+        configured = {webhook.name for webhook in webhooks}
+        missing = allowed - configured
+        if missing:
+            raise EventError(
+                "tenant references unknown webhooks: {}".format(
+                    ", ".join(sorted(missing))
+                )
+            )
     store = AtomicCheckpointStore(
         state_path,
         max_seen_events=max_seen_events,

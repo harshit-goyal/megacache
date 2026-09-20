@@ -4,6 +4,11 @@ Version 0.9 adds an optional, dependency-free policy layer based on bounded
 counters and deterministic formulas. It is not machine learning. The default
 configuration keeps intelligence disabled and preserves LRU eviction.
 
+In managed mode, every tenant owns a separate intelligence facade and bounded
+telemetry store. Recommendations, experiments, hot-key decisions, and explain
+results therefore contain only that tenant's logical keys; existing
+named-user key prefixes continue to narrow access inside the tenant.
+
 Enable it explicitly:
 
 ```bash

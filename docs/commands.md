@@ -99,6 +99,23 @@ mc serve
 The bundled Kafka and database integrations are externally-fed adapter
 interfaces, not network clients. See [Freshness events](events.md).
 
+Enable the self-hosted managed control plane:
+
+```bash
+cp control-plane.example.json control-plane.json
+mc init-users users.json --username admin --tenant default
+export MEGACACHE_USERS_FILE="$PWD/users.json"
+export MEGACACHE_CONTROL_PLANE_FILE="$PWD/control-plane.json"
+export MEGACACHE_CONTROL_STATE_DIRECTORY="$PWD/megacache-control-state"
+export MEGACACHE_CONTROL_MASTER_KEY="$(
+  python3 -c 'import base64,secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())'
+)"
+mc serve
+```
+
+Tenant quotas in the file must sum to no more than the process entry and byte
+limits. See [Self-hosted managed control plane](control-plane.md).
+
 The examples below use this shell variable:
 
 ```bash
@@ -221,6 +238,39 @@ mc events-retry --limit 25
 
 `mc event` requires `invalidate` permission. Event status and retries require
 administrator permission.
+
+Inspect and operate the managed control plane:
+
+```bash
+mc identity
+mc control-status
+mc control-tenants
+mc deployment-status
+mc deployment-set default deployment.json
+mc deployment-observe default observation.json
+mc backup --tenant default
+mc operation OPERATION_ID
+mc data-export --tenant default
+mc audit --tenant default --after 0 --limit 1000
+mc audit-prune THROUGH_SEQUENCE EXPORTED_RECORD_HASH --yes
+mc billing-export --tenant default
+```
+
+Backup, export, restore validation, restore, drill, audit export, and tenant
+deletion are durable asynchronous operations. Poll them with `mc operation`.
+Restore and deletion require explicit two-step safeguards:
+
+```bash
+mc restore-validate BACKUP_ID --tenant default
+mc restore default BACKUP_ID VALIDATION_TOKEN --confirm default --yes
+
+mc tenant-delete-challenge --tenant default
+mc tenant-delete default CHALLENGE --confirm default --yes
+```
+
+These commands manage local encrypted artifacts and desired/observed metadata.
+They do not invoke a hosted dashboard, cloud orchestrator, billing provider, or
+KMS.
 
 Clear all entries only with explicit confirmation:
 
@@ -462,6 +512,6 @@ python3 -m pip wheel --no-deps --wheel-dir dist .
 Install the generated wheel:
 
 ```bash
-python3 -m pip install dist/megacache-0.9.0-py3-none-any.whl
+python3 -m pip install dist/megacache-1.0.0-py3-none-any.whl
 mc
 ```

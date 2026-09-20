@@ -1,4 +1,4 @@
-# MegaCache Java SDK 0.9
+# MegaCache Java SDK 1.0
 
 The Java 11+ SDK uses only the JDK. It includes RESP2 operations, typed
 exceptions, MegaCache lease/fetch/invalidate/status methods, bounded L1

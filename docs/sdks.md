@@ -1,6 +1,6 @@
 # SDKs and integrations
 
-Version 0.9 supports four dependency-free SDKs:
+Version 1.0 supports four dependency-free SDKs:
 
 | SDK | Package/source | Minimum runtime | Conformance command |
 |---|---|---:|---|
@@ -62,7 +62,7 @@ Examples intentionally import no optional frameworks:
 They are small adapters meant to be composed with application-owned framework
 and driver instances, avoiding dependency/version conflicts.
 
-## v0.9 validation record
+## v1.0 validation record
 
 The release implementation was exercised locally with Python 3.9.6, Node.js
 25.2.1/npm 11.6.2, and OpenJDK/javac 25 using `--release 11`. The Go toolchain

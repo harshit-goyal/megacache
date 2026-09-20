@@ -35,6 +35,21 @@ priority decisions to `OriginCache`, and exposes explain, recommendation,
 simulation, and experiment status methods through every facade. It does not
 retain values; content-change detection keeps only SHA-256 digests.
 
+When `MEGACACHE_CONTROL_PLANE_FILE` is configured, version 1.0 creates one
+complete data-plane stack per tenant and places `ManagedControlPlane` above
+them as an authenticated router. Separate engines, cluster coordinators,
+origin runtimes, event stores, invalidation cursors, and intelligence stores
+prevent cross-tenant key, tag, origin, event, or recommendation enumeration.
+Each logical node's entry and byte budgets cap the sum of configured tenant
+budgets. Per-tenant token buckets, connection counters, and origin admission
+budgets provide additional noisy-neighbor boundaries.
+
+Control state contains metadata and aggregate usage only, never cache values.
+It is atomically replaced under one lifetime advisory owner lock. Tenant
+backup and export values live only in bounded encrypted artifacts.
+Administrative records use rotating append-only JSONL files whose
+HMAC-SHA256 records form one verified hash chain.
+
 ## Distributed coordination
 
 `ClusterStorage` is a well-defined in-process coordinator. Every node has a
@@ -247,6 +262,29 @@ mutations, and experiment rollbacks. Cache keys and derived classes are never
 Prometheus labels. Automated rollback logs contain the experiment ID and
 aggregate rates, not cache keys or values.
 
+Managed-mode metrics aggregate tenants without tenant labels. Authenticated
+dashboard responses are tenant scoped unless an explicit platform role grants
+metadata access. Request logs add only the opaque keyed tenant namespace.
+Durable hourly usage records count operations, errors, request/response payload bytes,
+origin operations, and accepted connections.
+
+## Managed operations
+
+Backups snapshot one tenant, encode binary values explicitly, and encrypt an
+authenticated artifact with purpose-separated keys from the `KeyProvider`
+interface. Restore validation decrypts, authenticates, checks identity and
+schema, and restores into a bounded scratch engine before issuing a
+short-lived token. Replacement restore drains admitted tenant operations and
+rolls back to the prior in-memory snapshot on failure.
+
+Desired deployment state is generation numbered and describes region
+placement, target version, rolling-upgrade availability, and drain intent.
+Observed instances are bounded status reports. MegaCache stores and compares
+these records but does not actuate them. DR drills perform a real local
+artifact restore into a scratch engine and record measured RPO/RTO results.
+Backup scheduling is in-process and state-backed; external systems remain
+responsible for copying artifacts and orchestrating regional recovery.
+
 ## Stampede prevention
 
 Embedded users can call `CacheEngine.get_or_load`. One caller executes the
@@ -282,7 +320,7 @@ deployed processes have independent flights and can each contact the origin.
 
 ## Explicit non-guarantees
 
-Version 0.9 does not ship a node discovery service or authenticated,
+Version 1.0 does not ship a node discovery service or authenticated,
 encrypted node-to-node RPC transport. `MEGACACHE_CLUSTER_NODES` creates
 multiple logical stores inside one process; loss of that process loses every
 logical node and all cache data. The coordinator interfaces can model missing
@@ -295,9 +333,9 @@ Entries are not persisted. Restarting the process empties the cache. Use the
 coordinator as an embedded/testable distributed state machine until a secure
 transport implements the same interfaces.
 
-HTTP origin and event definitions are loaded only at startup. Version 0.9 has
-no database or Kafka wire client and no credential-refresh mechanism for fixed
-origin headers or webhook secrets.
+HTTP origin, event, and tenant definitions are loaded only at startup. Version
+1.0 has no database or Kafka wire client and no credential-refresh mechanism
+for fixed origin headers or webhook secrets.
 Refresh workers and singleflight state are in-process and are lost at restart.
 
 Intelligence telemetry and hot-key classification are in-memory and reset at
@@ -309,6 +347,15 @@ multi-process consensus store. Exactly one MegaCache process may own it;
 processes enforce this with a lifetime advisory lock on a sibling lock file.
 Cache entries remain in-memory, so a restart can make a replayed invalidation a
 no-op even though the checkpoint correctly records source progress.
+
+The managed control plane remains in the same process as every tenant data
+plane. It supplies no hosted dashboard, machine provisioning, traffic
+management, external billing provider, external KMS adapter, compliance
+certification, or cross-region replication. Its JSON desired/observed model is
+an integration contract for those systems. A metering persistence error is
+reported without stopping cache traffic, so operators must alert and reconcile
+the bounded in-memory gap. Local file deletion cannot guarantee physical media
+erasure.
 
 Clients remain responsible for deciding whether stale data is safe for their
 domain. Never cache authorization decisions, secrets, or correctness-critical

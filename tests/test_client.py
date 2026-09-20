@@ -182,7 +182,7 @@ class NativeClientTests(unittest.TestCase):
         with redirect_stdout(output), self.assertRaises(SystemExit) as exit_status:
             run(["--version"])
         self.assertEqual(0, exit_status.exception.code)
-        self.assertEqual("MegaCache 0.9.0", output.getvalue().strip())
+        self.assertEqual("MegaCache 1.0.0", output.getvalue().strip())
 
     def test_native_cli_fetches_only_from_a_named_origin(self):
         output = io.StringIO()

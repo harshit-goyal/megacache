@@ -9,12 +9,12 @@ lease-protected refreshes, tag invalidation, bounded memory, and useful
 operational metrics. Clients can use either Redis-compatible RESP2 commands or
 the HTTP API.
 
-> MegaCache is an alpha release. Version 0.9 adds conservative, deterministic
-> cache intelligence: bounded telemetry, adaptive origin TTL, optional
-> cost-aware eviction, in-process hot-key copies, prioritized refresh,
-> explainability, dry-run recommendations, and guarded experiments.
-> Cluster coordination remains in-process: separately deployed processes do
-> not form a cluster.
+> MegaCache 1.0 adds an opt-in self-hosted managed control-plane foundation:
+> cryptographically bound tenant identities, isolated tenant data planes,
+> hard quotas, durable usage and audit records, encrypted backup/restore,
+> billing export contracts, deployment/DR metadata, and privacy workflows.
+> It does not include a hosted dashboard, external orchestration, a billing
+> provider, a cloud KMS, or a multi-process data plane.
 
 ## Why MegaCache?
 
@@ -57,6 +57,12 @@ related keys stale. MegaCache makes the safe path explicit:
 - **Optional cache intelligence** uses bounded counters and transparent
   formulas—no ML claims, runtime dependencies, untrusted expressions, or
   unbounded key labels.
+- **Tenant-isolated data planes** keep keys, tags, origins, events,
+  intelligence, eviction, and invalidation cursors out of other tenants.
+- **Managed operations metadata** covers quotas, usage, append-only
+  tamper-evident audit, encrypted backups, restore drills, rolling desired
+  state, billing export, and privacy deletion without pretending to provision
+  hosted infrastructure.
 
 ## Quick start
 
@@ -89,6 +95,10 @@ mc policy-simulate policy-simulation.example.json
 mc experiments
 mc event change.json
 mc events-status
+mc identity
+mc control-status
+mc backup
+mc audit
 ```
 
 Redis clients remain supported through RESP2:
@@ -233,6 +243,18 @@ This prevents a cache stampede without trusting a client-side distributed lock.
 | `MEGACACHE_EXPERIMENT_MIN_SAMPLES` | `100` | Required hit/miss observations per arm |
 | `MEGACACHE_EXPERIMENT_MAX_MISS_REGRESSION` | `0.05` | Candidate miss-rate regression guardrail |
 | `MEGACACHE_INTELLIGENCE_STATE_FILE` | `megacache-intelligence-state.json` | Local atomic experiment decision audit |
+| `MEGACACHE_CONTROL_PLANE_FILE` | unset | Opt-in v1 tenant/control-plane definition |
+| `MEGACACHE_CONTROL_STATE_DIRECTORY` | `megacache-control-state` | Protected single-owner state, audit, backup, and export directory |
+| `MEGACACHE_CONTROL_MASTER_KEY` | unset | Base64 32–64 byte local master key |
+| `MEGACACHE_CONTROL_KEY_FILE` | unset | Protected versioned local keyring; mutually exclusive with master key |
+| `MEGACACHE_CONTROL_STATE_MAX_BYTES` | `16777216` | Maximum atomic control-state bytes |
+| `MEGACACHE_CONTROL_MAX_TENANTS` | `100` | Startup tenant-count bound |
+| `MEGACACHE_CONTROL_MAX_USAGE_PERIODS` | `744` | Maximum retained hourly usage periods per tenant |
+| `MEGACACHE_CONTROL_MAX_OPERATIONS` | `1000` | Maximum durable asynchronous operations |
+| `MEGACACHE_CONTROL_AUDIT_SEGMENT_BYTES` | `1048576` | Audit segment rotation threshold |
+| `MEGACACHE_CONTROL_AUDIT_MAX_SEGMENTS` | `32` | Audit segments retained before control mutations fail closed |
+| `MEGACACHE_CONTROL_ARTIFACT_MAX_BYTES` | `134217728` | Maximum encrypted backup/export artifact |
+| `MEGACACHE_CONTROL_SCHEDULER_INTERVAL_SECONDS` | `30` | Backup and retention scheduler interval |
 
 The native client also reads `MEGACACHE_CLI_HOST`,
 `MEGACACHE_CLI_PORT`, `MEGACACHE_CLI_USERNAME`,
@@ -243,7 +265,15 @@ Use `mc init-users users.json` and configure `MEGACACHE_USERS_FILE` for every
 network-accessible deployment. `MEGACACHE_API_KEY` remains available for
 legacy administrator access. Health and metrics endpoints remain public so
 infrastructure probes can reach them; restrict `/metrics` at the network or
-reverse-proxy layer.
+reverse-proxy layer. Managed-mode metrics are aggregate and never use tenant
+IDs or cache keys as labels.
+
+Managed mode requires named users, `control-plane.example.json`, a protected
+state directory, and exactly one local key source. Run
+`mc init-users users.json --tenant default`, then see the
+[self-hosted control-plane guide](docs/control-plane.md). Tenant identity comes
+from authentication and cannot be selected with a request header or cache-key
+prefix.
 
 To enable read-through fetching, copy `origins.example.json`, replace its
 authority and policy, and set `MEGACACHE_ORIGINS_FILE`. Every origin requires
@@ -270,6 +300,7 @@ clients.
 - [Implementation roadmap](docs/roadmap.md)
 - [SDKs and framework integrations](docs/sdks.md)
 - [Cache intelligence](docs/intelligence.md)
+- [Self-hosted managed control plane](docs/control-plane.md)
 - [Versioning policy](docs/versioning.md)
 - [Contributing](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)
@@ -279,10 +310,10 @@ clients.
 Phase 1 production foundations are available in version 0.4, Phase 2
 coordinator behavior in 0.5, Phase 3 HTTP origin protection in 0.6, Phase 4
 freshness automation in 0.7, Phase 5 developer tooling in 0.8, and Phase 6
-cache intelligence in 0.9.
-Secure inter-process transport remains a documented boundary rather than a
-simulated guarantee. The managed control plane remains on the
-[implementation roadmap](docs/roadmap.md).
+cache intelligence in 0.9. Phase 7's self-hosted control-plane foundation is
+complete in 1.0. Secure inter-process transport, hosted UI/service operation,
+external orchestration, billing providers, cloud KMS integrations, and
+compliance certification remain explicit external boundaries.
 
 ## License
 

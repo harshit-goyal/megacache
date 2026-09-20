@@ -120,7 +120,7 @@ MC.SET product:123 '{"id":123}' TTL 300 STALE 900 LEASE token-from-mc-lease
 ```
 
 The optional `WINDOWS` argument appends remaining fresh/stale milliseconds to
-the `fresh`, `stale`, and `stale_lease` responses. Version 0.9 SDKs use it to
+the `fresh`, `stale`, and `stale_lease` responses. Version 1.0 SDKs use it to
 ensure an L1 entry never outlives its L2 freshness window. Omitting `WINDOWS`
 preserves the version 0.7 response shape.
 
@@ -273,6 +273,40 @@ MC.EVENT.RETRY 25
 
 The optional positive limit defaults to 100. Administrator permission is
 required.
+
+## Managed control-plane commands
+
+Managed mode binds the RESP connection to the authenticated user's
+`tenant_id`; re-authenticating one connection as another tenant is rejected.
+Ordinary Redis and `MC.*` data commands operate only on that tenant.
+
+| Command | Purpose |
+|---|---|
+| `MC.IDENTITY` | Return the authenticated tenant namespace, permissions, and roles |
+| `MC.CONTROL.STATUS [tenant]` | Return the tenant JSON dashboard |
+| `MC.CONTROL.TENANTS` | List tenant metadata for platform operators |
+| `MC.CONTROL.OPERATION id` | Poll asynchronous operation status |
+| `MC.CONTROL.ORCHESTRATOR` | Export desired/observed deployment metadata |
+| `MC.CONTROL.DEPLOYMENT tenant json` | Set desired rolling/drain state |
+| `MC.CONTROL.OBSERVE tenant json` | Report observed instance state |
+| `MC.BACKUP [tenant]` | Queue an encrypted backup |
+| `MC.DATA.EXPORT [tenant]` | Queue an encrypted privacy export |
+| `MC.RESTORE.VALIDATE [tenant] backup-id` | Queue backup validation |
+| `MC.RESTORE tenant backup-id token confirmation` | Queue replacement restore |
+| `MC.DR.DRILL [tenant] backup-id` | Queue a non-mutating local recovery drill |
+| `MC.TENANT.DELETE.CHALLENGE [tenant]` | Issue a deletion challenge |
+| `MC.TENANT.DELETE tenant challenge confirmation` | Queue irreversible deletion |
+| `MC.AUDIT [tenant|-] [after] [limit]` | Export verified audit records |
+| `MC.AUDIT.EXPORT [tenant] [after] [limit]` | Queue encrypted audit export |
+| `MC.AUDIT.PRUNE sequence hash` | Prune fully exported segments at an exact verified boundary |
+| `MC.BILLING.EXPORT [tenant|-] [start|-] [end|-]` | Prepare deterministic usage batch |
+
+Tenant administrators may name only their own tenant. `platform_admin`,
+`operator`, `auditor`, and `billing_admin` capabilities are separate from
+cache `admin` permission. These commands expose metadata and local workflows;
+they do not provision infrastructure or contact a billing/KMS service.
+Quota rejection uses a `BUSY` error; suspended, maintenance, and deleted
+tenants use `TENANTUNAVAILABLE`.
 
 ## Compatibility boundaries
 

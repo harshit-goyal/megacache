@@ -49,6 +49,14 @@ class AuthenticationTests(unittest.TestCase):
                             "permissions": ["write"],
                             "key_prefixes": ["tenant:1:"],
                         },
+                        {
+                            "username": "managed",
+                            "password_hash": password_hash,
+                            "permissions": ["read"],
+                            "key_prefixes": ["catalog:"],
+                            "tenant_id": "acme",
+                            "roles": ["tenant_admin"],
+                        },
                     ]
                 },
                 destination,
@@ -80,6 +88,18 @@ class AuthenticationTests(unittest.TestCase):
             json.dump({"users": []}, destination)
         with self.assertRaisesRegex(ValueError, "at least one user"):
             AuthManager(users_file=path)
+
+    def test_tenant_identity_and_control_roles_are_bound_to_user(self):
+        auth = AuthManager(
+            users_file=self.users_file,
+            allowed_tenants=("default", "acme"),
+        )
+        principal = auth.authenticate("managed", "correct horse")
+        self.assertEqual("acme", principal.tenant_id)
+        self.assertTrue(principal.manages_tenant("acme"))
+        self.assertFalse(principal.manages_tenant("other"))
+        self.assertTrue(principal.allows("read", ("catalog:item",)))
+        self.assertFalse(principal.allows("read", ("other:item",)))
 
     def test_resp_named_user_permissions(self):
         config = self._config()

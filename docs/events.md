@@ -7,6 +7,12 @@ checkpoint. The design is at-least-once: a crash before checkpoint persistence
 can repeat an invalidation, but it cannot silently skip a successfully
 checkpointed change.
 
+In managed mode, each tenant has an independent event state file, checkpoint
+space, deduplication set, DLQ, dependency traversal, and invalidation target.
+Webhook source names are assigned to exactly one tenant in the control-plane
+configuration, while authenticated direct events use the caller's bound
+tenant. Event status never merges checkpoints across tenants.
+
 ## Event envelope
 
 Every source is normalized to:

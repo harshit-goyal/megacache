@@ -702,6 +702,9 @@ class OriginCache:
         self._refresh_sequence = 0
         self._scheduled = set()
         self._scheduled_lock = threading.Lock()
+        self._background_condition = threading.Condition()
+        self._background_paused = False
+        self._background_active = 0
         self._closed = threading.Event()
         self._workers = []
         self._flight_registry = _flight_registry(storage)
@@ -930,6 +933,9 @@ class OriginCache:
             return
         self._shutdown_started.set()
         self._closed.set()
+        with self._background_condition:
+            self._background_paused = False
+            self._background_condition.notify_all()
         self._global.close()
         for runtime in self._runtimes.values():
             runtime.admission.close()
@@ -941,6 +947,25 @@ class OriginCache:
                 )
             except queue.Full:
                 break
+
+    def pause_background_work(self, timeout: float) -> None:
+        deadline = time.monotonic() + max(0.0, timeout)
+        with self._background_condition:
+            self._background_paused = True
+            while self._background_active:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self._background_paused = False
+                    self._background_condition.notify_all()
+                    raise OriginUnavailable(
+                        "origin background-work drain timed out"
+                    )
+                self._background_condition.wait(remaining)
+
+    def resume_background_work(self) -> None:
+        with self._background_condition:
+            self._background_paused = False
+            self._background_condition.notify_all()
 
     def close(self, timeout: float = 10.0) -> None:
         self.begin_shutdown()
@@ -1365,7 +1390,18 @@ class OriginCache:
                 self._refresh_queue.task_done()
                 return
             key, origin, path = job
+            background_admitted = False
             try:
+                with self._background_condition:
+                    while (
+                        self._background_paused
+                        and not self._closed.is_set()
+                    ):
+                        self._background_condition.wait(0.1)
+                    if self._closed.is_set():
+                        continue
+                    self._background_active += 1
+                    background_admitted = True
                 if not self._closed.is_set():
                     self.fetch(
                         key, origin, path, force_refresh=True
@@ -1373,6 +1409,10 @@ class OriginCache:
             except Exception:
                 self._runtime(origin).increment("refresh_errors_total")
             finally:
+                with self._background_condition:
+                    if background_admitted:
+                        self._background_active -= 1
+                    self._background_condition.notify_all()
                 with self._scheduled_lock:
                     self._scheduled.discard(job)
                 self._refresh_queue.task_done()
@@ -1544,7 +1584,7 @@ def _http_transport(
     headers = dict(origin.headers)
     headers["Host"] = origin.authority
     headers.setdefault("Accept-Encoding", "identity")
-    headers.setdefault("User-Agent", "MegaCache/0.9")
+    headers.setdefault("User-Agent", "MegaCache/1.0")
     if propagated_headers:
         headers.update(propagated_headers)
     try:

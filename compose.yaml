@@ -15,6 +15,7 @@ services:
       MEGACACHE_REPLICA_COUNT: "1"
       MEGACACHE_CONSISTENCY: "majority"
       MEGACACHE_EVENT_STATE_FILE: "/var/lib/megacache/events-state.json"
+      MEGACACHE_CONTROL_STATE_DIRECTORY: "/var/lib/megacache/control"
     volumes:
       - megacache-events:/var/lib/megacache
     restart: unless-stopped

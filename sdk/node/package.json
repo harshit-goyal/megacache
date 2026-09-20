@@ -1,6 +1,6 @@
 {
   "name": "@megacache/client",
-  "version": "0.9.0",
+  "version": "1.0.0",
   "description": "Dependency-free RESP2 client and bounded L1 cache for MegaCache",
   "main": "src/index.js",
   "types": "src/index.d.ts",

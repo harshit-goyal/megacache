@@ -18,6 +18,11 @@ Set `MEGACACHE_ORIGINS_FILE` to a startup-loaded JSON document:
 
 `origins.example.json` contains every policy field.
 
+In managed mode, each tenant explicitly lists allowed origin names in the
+control-plane file. MegaCache builds an independent `OriginCache` runtime and
+global concurrency budget for that tenant, and `mc origins` exposes only that
+tenant's configured origins.
+
 ## Required authority policy
 
 | Field | Meaning |

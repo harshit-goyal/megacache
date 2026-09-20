@@ -159,6 +159,51 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "between 1 and 99"):
                 Config.from_env()
 
+    def test_managed_control_plane_requires_named_users_and_one_key_source(self):
+        base = {
+            "MEGACACHE_NODE_ID": "node-a",
+            "MEGACACHE_CONTROL_PLANE_FILE": "tenants.json",
+        }
+        with patch.dict(os.environ, base, clear=True):
+            with self.assertRaisesRegex(ValueError, "USERS_FILE"):
+                Config.from_env()
+        with patch.dict(
+            os.environ,
+            dict(
+                base,
+                MEGACACHE_USERS_FILE="users.json",
+                MEGACACHE_CONTROL_MASTER_KEY="a2tra2tra2tra2tra2tra2tra2tra2tra2tra2tra2s=",
+                MEGACACHE_CONTROL_KEY_FILE="keys.json",
+            ),
+            clear=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "exactly one"):
+                Config.from_env()
+
+    def test_managed_control_plane_environment_is_parsed(self):
+        with patch.dict(
+            os.environ,
+            {
+                "MEGACACHE_NODE_ID": "node-a",
+                "MEGACACHE_USERS_FILE": "users.json",
+                "MEGACACHE_CONTROL_PLANE_FILE": "tenants.json",
+                "MEGACACHE_CONTROL_MASTER_KEY": (
+                    "a2tra2tra2tra2tra2tra2tra2tra2tra2tra2tra2s="
+                ),
+                "MEGACACHE_CONTROL_STATE_DIRECTORY": "state",
+                "MEGACACHE_CONTROL_MAX_TENANTS": "12",
+                "MEGACACHE_CONTROL_MAX_USAGE_PERIODS": "48",
+                "MEGACACHE_CONTROL_MAX_OPERATIONS": "200",
+            },
+            clear=True,
+        ):
+            config = Config.from_env()
+        self.assertEqual("tenants.json", config.control_plane_file)
+        self.assertEqual("state", config.control_state_directory)
+        self.assertEqual(12, config.control_max_tenants)
+        self.assertEqual(48, config.control_max_usage_periods)
+        self.assertEqual(200, config.control_max_operations)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2,8 +2,10 @@
 
 ## Supported versions
 
-MegaCache is currently alpha software. Security updates are provided for the
-latest release on the default branch.
+Security updates are provided for the latest release on the default branch.
+The 1.0 self-hosted control plane has automated isolation and tamper-detection
+coverage, but no independent certification or third-party security assessment
+is claimed.
 
 ## Reporting a vulnerability
 
@@ -24,7 +26,8 @@ and metrics endpoints with network policy.
 Create a named-users file with:
 
 ```bash
-mc init-users /run/secrets/megacache-users.json --username admin
+mc init-users /run/secrets/megacache-users.json \
+  --username admin --tenant default
 ```
 
 The file contains salted PBKDF2-HMAC-SHA256 password hashes and should be
@@ -44,12 +47,15 @@ Example:
 
 ```json
 {
+  "version": 2,
   "users": [
     {
       "username": "catalog-reader",
       "password_hash": "pbkdf2_sha256$600000$BASE64_SALT$BASE64_DIGEST",
       "permissions": ["read"],
-      "key_prefixes": ["catalog:"]
+      "key_prefixes": ["catalog:"],
+      "tenant_id": "default",
+      "roles": []
     }
   ]
 }
@@ -64,6 +70,56 @@ clients use `AUTH username password`; both must run over TLS.
 Cached values reside in process memory and must be treated according to their
 data classification. Request logs intentionally exclude cache keys, values,
 authorization headers, passwords, and RESP arguments.
+
+## Managed tenant security
+
+Managed mode requires a named-users file and binds each authenticated identity
+to exactly one `tenant_id`. Clients cannot choose a tenant through a request
+header or cache-key prefix. Existing `key_prefixes` are evaluated within that
+tenant. Each tenant receives a separate engine/coordinator, tag index, origin
+runtime, event store, invalidation cursor, and intelligence store. Tenant
+administrators cannot list other tenants or retrieve their operations, usage,
+audit records, origins, events, or recommendations.
+
+Data permissions are separate from control roles:
+
+- `tenant_admin` manages backup, restore, export, deletion, and status only for
+  its bound tenant;
+- `platform_admin` manages control metadata across tenants;
+- `operator` manages desired/observed deployment metadata;
+- `auditor` exports verified audit records; and
+- `billing_admin` prepares deterministic usage batches.
+
+Use separate credentials for these responsibilities. The legacy API key has
+broad control roles for migration and should not be enabled in a managed
+deployment.
+
+Protect `MEGACACHE_CONTROL_STATE_DIRECTORY` with host filesystem permissions.
+The state file is bounded, atomically replaced, and guarded by a lifetime
+advisory lock. Audit segments are append-only and HMAC chained; startup fails
+if retained history does not verify. When the segment bound is reached,
+control mutations fail closed rather than silently dropping records. Cache
+traffic remains independent of metering persistence, and an error is exposed
+for reconciliation. Pruning requires an auditor/platform role, an explicit
+irreversible CLI/API acknowledgement, and an exact sequence/hash from an
+exported global chain; a signed anchor preserves retained-chain continuity.
+
+Backups and data/audit exports are encrypted with a random nonce,
+purpose-separated HMAC-SHA256-derived keys, an HMAC PRF stream, and
+encrypt-then-MAC authentication. The local environment and JSON-file key
+providers require 32–64 bytes of key material and retain key IDs for rotation.
+They are not a cloud KMS. Applications embedding MegaCache can implement the
+`KeyProvider` interface for an external KMS/HSM. Keep old keys available until
+all retained artifacts using them have expired, and keep the namespace key ID
+stable for the lifetime of the control-state directory.
+
+Restore requires successful artifact/quota validation, a short-lived
+cryptographic validation token, an exact tenant confirmation, and an explicit
+irreversible acknowledgement. Tenant deletion has a separate short-lived
+challenge and removes in-memory values plus managed artifacts, but cannot
+guarantee physical erasure from filesystem snapshots, backups, or storage
+media. Audit and aggregate usage records are intentionally retained without
+cache values.
 
 ## Cache intelligence security
 
@@ -110,7 +166,7 @@ allowlists narrow, prefer TLS, use dedicated origin credentials with read-only
 scope, and restrict configuration-file permissions. Adding broad private
 network CIDRs materially expands what a compromised write-capable MegaCache
 client can reach. Origin definitions are loaded at startup, so restart after
-rotation. MegaCache 0.9 intentionally has no arbitrary URL mode.
+rotation. MegaCache 1.0 intentionally has no arbitrary URL mode.
 
 ## Event and webhook security
 
@@ -131,6 +187,9 @@ MegaCache returns a generic authentication error and never logs signatures,
 delivery identifiers, event bodies, rendered keys, or secrets.
 The normalized event source is bound to the configured webhook name, so one
 webhook credential cannot select another source's transformation rules.
+Managed mode additionally requires every webhook source name to belong to at
+most one tenant and routes it directly to that tenant's independent event
+store.
 
 Protect `MEGACACHE_EVENT_STATE_FILE` as sensitive operational data. It contains
 source cursors, event IDs, delivery claims, and failed event payloads in the
@@ -148,7 +207,7 @@ consumer-group or slot ownership, network allowlists, and driver updates.
 
 ## Cluster security boundary
 
-Version 0.9 provides an in-process cluster coordinator and no node-to-node
+Version 1.0 provides an in-process cluster coordinator and no node-to-node
 network listener. Logical node IDs in `MEGACACHE_CLUSTER_NODES` are local
 configuration, not authenticated identities. Do not expose or build an
 unauthenticated RPC shim around `ClusterStorage`.

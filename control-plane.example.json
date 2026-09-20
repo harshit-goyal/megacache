@@ -1,0 +1,82 @@
+{
+  "version": 1,
+  "default_tenant": "default",
+  "tenants": [
+    {
+      "id": "default",
+      "display_name": "Default tenant",
+      "quotas": {
+        "max_entries": 6000,
+        "max_bytes": 41943040,
+        "max_entry_bytes": 1048576,
+        "ops_per_second": 1000,
+        "burst_ops": 2000,
+        "max_connections": 200,
+        "origin_concurrency": 32
+      },
+      "origins": [],
+      "webhooks": [],
+      "regions": ["local-primary", "local-recovery"],
+      "primary_region": "local-primary",
+      "deployment": {
+        "version": "1.0.0",
+        "replicas": 1,
+        "max_unavailable": 1,
+        "drain": false
+      },
+      "backup": {
+        "interval_seconds": 3600,
+        "retention_count": 24,
+        "retention_seconds": 604800
+      },
+      "disaster_recovery": {
+        "rpo_seconds": 3600,
+        "rto_seconds": 900,
+        "recovery_regions": ["local-recovery"]
+      },
+      "retention": {
+        "usage_periods": 744,
+        "completed_operations": 500,
+        "export_count": 10
+      }
+    },
+    {
+      "id": "analytics",
+      "display_name": "Analytics tenant",
+      "quotas": {
+        "max_entries": 4000,
+        "max_bytes": 25165824,
+        "max_entry_bytes": 1048576,
+        "ops_per_second": 500,
+        "burst_ops": 1000,
+        "max_connections": 100,
+        "origin_concurrency": 16
+      },
+      "origins": [],
+      "webhooks": [],
+      "regions": ["local-primary", "local-recovery"],
+      "primary_region": "local-primary",
+      "deployment": {
+        "version": "1.0.0",
+        "replicas": 1,
+        "max_unavailable": 1,
+        "drain": false
+      },
+      "backup": {
+        "interval_seconds": 7200,
+        "retention_count": 12,
+        "retention_seconds": 604800
+      },
+      "disaster_recovery": {
+        "rpo_seconds": 7200,
+        "rto_seconds": 1800,
+        "recovery_regions": ["local-recovery"]
+      },
+      "retention": {
+        "usage_periods": 744,
+        "completed_operations": 500,
+        "export_count": 10
+      }
+    }
+  ]
+}

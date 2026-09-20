@@ -30,7 +30,7 @@ import javax.net.ssl.SSLParameters;
 import javax.net.ssl.SSLSocket;
 
 public final class MegaCacheClient implements Closeable {
-    public static final String VERSION = "0.9.0";
+    public static final String VERSION = "1.0.0";
     private static final int MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
     private static final int MAX_BULK_BYTES = 16 * 1024 * 1024;
     private static final int MAX_ARRAY_ITEMS = 100_000;

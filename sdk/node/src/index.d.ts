@@ -9,7 +9,7 @@ export interface ClientOptions {
 export interface CachePolicy {
   ttlSeconds?: number; staleSeconds?: number; tags?: string[]; staleIfError?: boolean;
 }
-export declare const VERSION: "0.9.0";
+export declare const VERSION: "1.0.0";
 export declare class MegaCacheError extends Error { code: string; }
 export declare class ConnectionError extends MegaCacheError {}
 export declare class ProtocolError extends MegaCacheError {}

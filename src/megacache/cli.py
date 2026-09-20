@@ -16,12 +16,19 @@ from .auth import hash_password, write_example_users_file
 from .client import MegaCacheClient, MegaCacheClientError
 from .cluster import ClusterNode, ClusterStorage
 from .config import Config
+from .controlplane import (
+    ControlPlaneError,
+    ManagedControlPlane,
+    load_control_plane_definition,
+    load_key_provider,
+    tenant_namespace_id,
+)
 from .coordination import MutationClock
 from .engine import CacheEngine
 from .events import load_event_automation
 from .intelligence import CacheIntelligence
 from .observability import configure_logging
-from .origin import OriginCache
+from .origin import OriginCache, load_origin_definitions
 from .resp import MegaCacheRespServer
 from .server import MegaCacheServer
 from .transport import enable_server_tls, validate_tls_config
@@ -33,7 +40,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Run and interact with MegaCache.",
     )
     parser.add_argument(
-        "--version", action="version", version="MegaCache 0.9.0"
+        "--version", action="version", version="MegaCache 1.0.0"
     )
     parser.add_argument(
         "--host",
@@ -164,6 +171,101 @@ def build_parser() -> argparse.ArgumentParser:
         "status", help="show cluster health and replication status"
     )
     commands.add_parser(
+        "identity", help="show the authenticated tenant identity"
+    )
+    control_status = commands.add_parser(
+        "control-status", help="show the tenant control-plane dashboard"
+    )
+    control_status.add_argument("--tenant")
+    commands.add_parser(
+        "control-tenants",
+        help="list tenant metadata (platform operator only)",
+    )
+    commands.add_parser(
+        "deployment-status",
+        help="show desired and observed deployment metadata",
+    )
+    deployment_set = commands.add_parser(
+        "deployment-set",
+        help="set desired rolling deployment metadata from JSON",
+    )
+    deployment_set.add_argument("tenant")
+    deployment_set.add_argument("path", nargs="?", default="-")
+    deployment_observe = commands.add_parser(
+        "deployment-observe",
+        help="report observed deployment metadata from JSON",
+    )
+    deployment_observe.add_argument("tenant")
+    deployment_observe.add_argument("path", nargs="?", default="-")
+    operation = commands.add_parser(
+        "operation", help="show asynchronous control operation status"
+    )
+    operation.add_argument("operation_id")
+    backup = commands.add_parser(
+        "backup", help="queue an encrypted tenant backup"
+    )
+    backup.add_argument("--tenant")
+    data_export = commands.add_parser(
+        "data-export", help="queue an encrypted tenant data export"
+    )
+    data_export.add_argument("--tenant")
+    restore_validate = commands.add_parser(
+        "restore-validate", help="queue validation of an encrypted backup"
+    )
+    restore_validate.add_argument("backup_id")
+    restore_validate.add_argument("--tenant")
+    restore = commands.add_parser(
+        "restore", help="queue a validated replacement restore"
+    )
+    restore.add_argument("tenant")
+    restore.add_argument("backup_id")
+    restore.add_argument("validation_token")
+    restore.add_argument("--confirm", required=True)
+    restore.add_argument("--yes", action="store_true")
+    drill = commands.add_parser(
+        "dr-drill", help="queue a non-mutating recovery drill"
+    )
+    drill.add_argument("backup_id")
+    drill.add_argument("--tenant")
+    delete_challenge = commands.add_parser(
+        "tenant-delete-challenge",
+        help="issue a short-lived irreversible deletion challenge",
+    )
+    delete_challenge.add_argument("--tenant")
+    tenant_delete = commands.add_parser(
+        "tenant-delete", help="irreversibly delete tenant data"
+    )
+    tenant_delete.add_argument("tenant")
+    tenant_delete.add_argument("challenge")
+    tenant_delete.add_argument("--confirm", required=True)
+    tenant_delete.add_argument("--yes", action="store_true")
+    audit = commands.add_parser(
+        "audit", help="export verified audit records as JSON"
+    )
+    audit.add_argument("--tenant")
+    audit.add_argument("--after", type=int, default=0)
+    audit.add_argument("--limit", type=int, default=1000)
+    audit_export = commands.add_parser(
+        "audit-export", help="queue an encrypted audit export"
+    )
+    audit_export.add_argument("--tenant")
+    audit_export.add_argument("--after", type=int, default=0)
+    audit_export.add_argument("--limit", type=int, default=1000)
+    audit_prune = commands.add_parser(
+        "audit-prune",
+        help="prune fully exported audit segments using the signed boundary",
+    )
+    audit_prune.add_argument("through_sequence", type=int)
+    audit_prune.add_argument("expected_hash")
+    audit_prune.add_argument("--yes", action="store_true")
+    billing = commands.add_parser(
+        "billing-export",
+        help="prepare a deterministic idempotent usage batch",
+    )
+    billing.add_argument("--tenant")
+    billing.add_argument("--start-period")
+    billing.add_argument("--end-period")
+    commands.add_parser(
         "origins", help="show configured origin health and breaker state"
     )
     recommendations = commands.add_parser(
@@ -214,6 +316,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     init_users.add_argument("path")
     init_users.add_argument("--username", default="admin")
+    init_users.add_argument("--tenant", default="default")
     return parser
 
 
@@ -225,10 +328,12 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
     if args.command == "hash-password":
         return _hash_password()
     if args.command == "init-users":
-        return _init_users(args.path, args.username)
+        return _init_users(args.path, args.username, args.tenant)
 
     if args.command == "flush" and not args.yes:
         parser.error("flush requires --yes")
+    if args.command in ("restore", "tenant-delete", "audit-prune") and not args.yes:
+        parser.error("{} requires --yes".format(args.command))
     if args.command == "mset" and len(args.pairs) % 2:
         parser.error("mset requires complete KEY VALUE pairs")
 
@@ -314,6 +419,120 @@ def _execute(client: MegaCacheClient, args: argparse.Namespace) -> Any:
         return _decode_json_response(client.command(*parts))
     if command == "status":
         return _decode_json_response(client.command("MC.STATUS"))
+    if command == "identity":
+        return _decode_json_response(client.command("MC.IDENTITY"))
+    if command == "control-status":
+        parts = ["MC.CONTROL.STATUS"]
+        if args.tenant is not None:
+            parts.append(args.tenant)
+        return _decode_json_response(client.command(*parts))
+    if command == "control-tenants":
+        return _decode_json_response(client.command("MC.CONTROL.TENANTS"))
+    if command == "deployment-status":
+        return _decode_json_response(
+            client.command("MC.CONTROL.ORCHESTRATOR")
+        )
+    if command == "deployment-set":
+        return _decode_json_response(
+            client.command(
+                "MC.CONTROL.DEPLOYMENT",
+                args.tenant,
+                _read_json_document(args.path, "deployment"),
+            )
+        )
+    if command == "deployment-observe":
+        return _decode_json_response(
+            client.command(
+                "MC.CONTROL.OBSERVE",
+                args.tenant,
+                _read_json_document(args.path, "deployment observation"),
+            )
+        )
+    if command == "operation":
+        return _decode_json_response(
+            client.command("MC.CONTROL.OPERATION", args.operation_id)
+        )
+    if command == "backup":
+        parts = ["MC.BACKUP"]
+        if args.tenant is not None:
+            parts.append(args.tenant)
+        return _decode_json_response(client.command(*parts))
+    if command == "data-export":
+        parts = ["MC.DATA.EXPORT"]
+        if args.tenant is not None:
+            parts.append(args.tenant)
+        return _decode_json_response(client.command(*parts))
+    if command == "restore-validate":
+        parts = ["MC.RESTORE.VALIDATE"]
+        if args.tenant is not None:
+            parts.append(args.tenant)
+        parts.append(args.backup_id)
+        return _decode_json_response(client.command(*parts))
+    if command == "restore":
+        return _decode_json_response(
+            client.command(
+                "MC.RESTORE",
+                args.tenant,
+                args.backup_id,
+                args.validation_token,
+                args.confirm,
+            )
+        )
+    if command == "dr-drill":
+        parts = ["MC.DR.DRILL"]
+        if args.tenant is not None:
+            parts.append(args.tenant)
+        parts.append(args.backup_id)
+        return _decode_json_response(client.command(*parts))
+    if command == "tenant-delete-challenge":
+        parts = ["MC.TENANT.DELETE.CHALLENGE"]
+        if args.tenant is not None:
+            parts.append(args.tenant)
+        return _decode_json_response(client.command(*parts))
+    if command == "tenant-delete":
+        return _decode_json_response(
+            client.command(
+                "MC.TENANT.DELETE",
+                args.tenant,
+                args.challenge,
+                args.confirm,
+            )
+        )
+    if command == "audit":
+        return _decode_json_response(
+            client.command(
+                "MC.AUDIT",
+                args.tenant or "-",
+                args.after,
+                args.limit,
+            )
+        )
+    if command == "audit-export":
+        parts = ["MC.AUDIT.EXPORT"]
+        if args.tenant is not None:
+            parts.append(args.tenant)
+        elif args.after or args.limit != 1000:
+            parts.append("-")
+        if len(parts) > 1 or args.after or args.limit != 1000:
+            parts.extend([args.after, args.limit])
+        return _decode_json_response(client.command(*parts))
+    if command == "audit-prune":
+        return _decode_json_response(
+            client.command(
+                "MC.AUDIT.PRUNE",
+                args.through_sequence,
+                args.expected_hash,
+            )
+        )
+    if command == "billing-export":
+        return _decode_json_response(
+            client.command(
+                "MC.BILLING.EXPORT",
+                args.tenant or "-",
+                args.start_period or "-",
+                args.end_period or "-",
+            )
+        )
     if command == "origins":
         return _decode_json_response(client.command("MC.ORIGINS"))
     if command == "recommendations":
@@ -361,88 +580,90 @@ def _serve(args: argparse.Namespace) -> int:
     if getattr(args, "resp_port", None) is not None:
         config = replace(config, resp_port=args.resp_port)
 
-    nodes = [
-        ClusterNode(
-            node_id,
-            CacheEngine(
-                max_entries=config.max_entries,
-                max_memory_bytes=config.max_memory_bytes,
-                max_entry_bytes=config.max_entry_bytes,
-                default_ttl_seconds=config.default_ttl_seconds,
-                default_stale_seconds=config.default_stale_seconds,
-                lease_seconds=config.lease_seconds,
-                eviction_policy=config.eviction_policy,
-            ),
+    if config.control_plane_file is None:
+        engine = _build_data_plane(config)
+    else:
+        definition = load_control_plane_definition(
+            config.control_plane_file,
+            max_tenants=config.control_max_tenants,
+            max_entries=config.max_entries,
+            max_bytes=config.max_memory_bytes,
+            max_entry_bytes=config.max_entry_bytes,
+            max_usage_periods=config.control_max_usage_periods,
+            max_operations=config.control_max_operations,
         )
-        for node_id in config.cluster_nodes
-    ]
-    cluster = ClusterStorage(
-        nodes,
-        replica_count=config.replica_count,
-        virtual_nodes=config.virtual_nodes,
-        consistency=config.consistency,
-        heartbeat_timeout_seconds=config.heartbeat_timeout_seconds,
-        lease_seconds=config.lease_seconds,
-        snapshot_payload_limit_bytes=config.snapshot_payload_limit_bytes,
-        snapshot_chunk_bytes=config.snapshot_chunk_bytes,
-        snapshot_max_in_flight=config.snapshot_max_in_flight,
-        max_leases=config.max_entries,
-        max_lease_memory_bytes=config.max_memory_bytes,
-        max_retained_tombstones=config.max_retained_tombstones,
-        max_hot_replica_keys=config.intelligence_max_keys,
-    )
-    engine = CacheIntelligence(
-        MutationClock(cluster),
-        enabled=config.intelligence_enabled,
-        adaptive_ttl=config.adaptive_ttl_enabled,
-        min_ttl_seconds=config.intelligence_min_ttl_seconds,
-        max_ttl_seconds=config.intelligence_max_ttl_seconds,
-        telemetry_max_keys=config.intelligence_max_keys,
-        telemetry_max_classes=config.intelligence_max_classes,
-        hot_key_threshold=config.hot_key_threshold,
-        hot_key_window_seconds=config.hot_key_window_seconds,
-        hot_key_extra_replicas=config.hot_key_extra_replicas,
-        experiment_enabled=config.experiment_enabled,
-        experiment_id=config.experiment_id,
-        experiment_allocation_percent=config.experiment_allocation_percent,
-        experiment_min_samples=config.experiment_min_samples,
-        experiment_max_miss_regression=(
-            config.experiment_max_miss_regression
-        ),
-        state_file=config.intelligence_state_file,
-        eviction_policy=config.eviction_policy,
-    )
-    if config.origins_file is not None:
-        engine = OriginCache.from_file(
-            engine,
-            config.origins_file,
-            worker_threads=config.origin_worker_threads,
-            refresh_queue_size=config.origin_refresh_queue_size,
-            global_max_concurrency=config.origin_global_max_concurrency,
-            global_max_queue=config.origin_global_max_queue,
+        key_provider = load_key_provider(
+            config.control_master_key, config.control_key_file
         )
-    if config.events_file is not None:
-        engine = load_event_automation(
-            engine,
-            config.events_file,
-            config.event_state_file,
-            max_seen_events=config.event_max_seen,
-            max_replay_tokens=config.event_max_replay_tokens,
-            max_dead_letters=config.event_max_dead_letters,
-            max_dead_letter_bytes=config.event_max_dead_letter_bytes,
-            max_streams=config.event_max_streams,
-            max_state_bytes=config.event_max_state_bytes,
-            max_payload_bytes=config.event_max_payload_bytes,
-            max_cursor_bytes=config.event_max_cursor_bytes,
-            max_error_bytes=config.event_max_error_bytes,
-            graph_max_nodes=config.event_graph_max_nodes,
-            graph_max_edges=config.event_graph_max_edges,
-            graph_max_fanout=config.event_graph_max_fanout,
-            graph_max_depth=config.event_graph_max_depth,
-            graph_max_invalidation_nodes=(
-                config.event_graph_max_invalidation_nodes
-            ),
+        all_origins = (
+            ()
+            if config.origins_file is None
+            else load_origin_definitions(config.origins_file)
         )
+        origin_map = {origin.name: origin for origin in all_origins}
+        engines = {}
+        tenant_paths = {}
+        try:
+            for tenant in definition.tenants:
+                missing_origins = set(tenant.origins) - set(origin_map)
+                if missing_origins:
+                    raise ControlPlaneError(
+                        "tenant '{}' references unknown origins: {}".format(
+                            tenant.tenant_id,
+                            ", ".join(sorted(missing_origins)),
+                        )
+                    )
+                namespace = tenant_namespace_id(
+                    key_provider, tenant.tenant_id
+                )
+                tenant_directory = os.path.join(
+                    os.path.abspath(config.control_state_directory),
+                    "tenants",
+                    namespace,
+                )
+                event_state = os.path.join(
+                    tenant_directory, "events-state.json"
+                )
+                intelligence_state = os.path.join(
+                    tenant_directory, "intelligence-state.json"
+                )
+                engines[tenant.tenant_id] = _build_data_plane(
+                    config,
+                    max_entries=tenant.quotas.max_entries,
+                    max_memory_bytes=tenant.quotas.max_bytes,
+                    max_entry_bytes=tenant.quotas.max_entry_bytes,
+                    origins=tuple(origin_map[name] for name in tenant.origins),
+                    origin_concurrency=tenant.quotas.origin_concurrency,
+                    event_state_file=event_state,
+                    intelligence_state_file=intelligence_state,
+                    allowed_webhooks=tenant.webhooks,
+                )
+                tenant_paths[tenant.tenant_id] = (
+                    event_state,
+                    intelligence_state,
+                )
+            engine = ManagedControlPlane(
+                definition,
+                engines,
+                state_directory=config.control_state_directory,
+                key_provider=key_provider,
+                state_max_bytes=config.control_state_max_bytes,
+                max_usage_periods=config.control_max_usage_periods,
+                max_operations=config.control_max_operations,
+                audit_segment_bytes=config.control_audit_segment_bytes,
+                audit_max_segments=config.control_audit_max_segments,
+                artifact_max_bytes=config.control_artifact_max_bytes,
+                scheduler_interval_seconds=(
+                    config.control_scheduler_interval_seconds
+                ),
+                tenant_state_paths=tenant_paths,
+            )
+        except Exception:
+            for candidate in engines.values():
+                close = getattr(candidate, "close", None)
+                if close is not None:
+                    close(config.shutdown_grace_seconds)
+            raise
     http_server = MegaCacheServer((config.host, config.port), config, engine)
     resp_server = MegaCacheRespServer(
         (config.resp_host, config.resp_port), config, engine
@@ -540,6 +761,138 @@ def _serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def _build_data_plane(
+    config: Config,
+    *,
+    max_entries: Optional[int] = None,
+    max_memory_bytes: Optional[int] = None,
+    max_entry_bytes: Optional[int] = None,
+    origins: Optional[Sequence[Any]] = None,
+    origin_concurrency: Optional[int] = None,
+    event_state_file: Optional[str] = None,
+    intelligence_state_file: Optional[str] = None,
+    allowed_webhooks: Optional[Sequence[str]] = None,
+) -> Any:
+    entry_limit = config.max_entries if max_entries is None else max_entries
+    memory_limit = (
+        config.max_memory_bytes
+        if max_memory_bytes is None
+        else max_memory_bytes
+    )
+    per_entry_limit = (
+        config.max_entry_bytes
+        if max_entry_bytes is None
+        else max_entry_bytes
+    )
+    nodes = [
+        ClusterNode(
+            node_id,
+            CacheEngine(
+                max_entries=entry_limit,
+                max_memory_bytes=memory_limit,
+                max_entry_bytes=per_entry_limit,
+                default_ttl_seconds=config.default_ttl_seconds,
+                default_stale_seconds=config.default_stale_seconds,
+                lease_seconds=config.lease_seconds,
+                eviction_policy=config.eviction_policy,
+            ),
+        )
+        for node_id in config.cluster_nodes
+    ]
+    cluster = ClusterStorage(
+        nodes,
+        replica_count=config.replica_count,
+        virtual_nodes=config.virtual_nodes,
+        consistency=config.consistency,
+        heartbeat_timeout_seconds=config.heartbeat_timeout_seconds,
+        lease_seconds=config.lease_seconds,
+        snapshot_payload_limit_bytes=min(
+            config.snapshot_payload_limit_bytes, memory_limit
+        ),
+        snapshot_chunk_bytes=min(
+            config.snapshot_chunk_bytes,
+            config.snapshot_payload_limit_bytes,
+            memory_limit,
+        ),
+        snapshot_max_in_flight=config.snapshot_max_in_flight,
+        max_leases=entry_limit,
+        max_lease_memory_bytes=memory_limit,
+        max_retained_tombstones=min(
+            config.max_retained_tombstones, max(1, entry_limit)
+        ),
+        max_hot_replica_keys=min(config.intelligence_max_keys, entry_limit),
+    )
+    engine: Any = CacheIntelligence(
+        MutationClock(cluster),
+        enabled=config.intelligence_enabled,
+        adaptive_ttl=config.adaptive_ttl_enabled,
+        min_ttl_seconds=config.intelligence_min_ttl_seconds,
+        max_ttl_seconds=config.intelligence_max_ttl_seconds,
+        telemetry_max_keys=min(config.intelligence_max_keys, entry_limit),
+        telemetry_max_classes=config.intelligence_max_classes,
+        hot_key_threshold=config.hot_key_threshold,
+        hot_key_window_seconds=config.hot_key_window_seconds,
+        hot_key_extra_replicas=config.hot_key_extra_replicas,
+        experiment_enabled=config.experiment_enabled,
+        experiment_id=config.experiment_id,
+        experiment_allocation_percent=config.experiment_allocation_percent,
+        experiment_min_samples=config.experiment_min_samples,
+        experiment_max_miss_regression=(
+            config.experiment_max_miss_regression
+        ),
+        state_file=(
+            config.intelligence_state_file
+            if intelligence_state_file is None
+            else intelligence_state_file
+        ),
+        eviction_policy=config.eviction_policy,
+    )
+    selected_origins = origins
+    if selected_origins is None and config.origins_file is not None:
+        selected_origins = load_origin_definitions(config.origins_file)
+    if selected_origins:
+        engine = OriginCache(
+            engine,
+            selected_origins,
+            worker_threads=min(
+                config.origin_worker_threads,
+                origin_concurrency or config.origin_global_max_concurrency,
+            ),
+            refresh_queue_size=config.origin_refresh_queue_size,
+            global_max_concurrency=min(
+                config.origin_global_max_concurrency,
+                origin_concurrency or config.origin_global_max_concurrency,
+            ),
+            global_max_queue=config.origin_global_max_queue,
+        )
+    if config.events_file is not None:
+        engine = load_event_automation(
+            engine,
+            config.events_file,
+            config.event_state_file
+            if event_state_file is None
+            else event_state_file,
+            max_seen_events=config.event_max_seen,
+            max_replay_tokens=config.event_max_replay_tokens,
+            max_dead_letters=config.event_max_dead_letters,
+            max_dead_letter_bytes=config.event_max_dead_letter_bytes,
+            max_streams=config.event_max_streams,
+            max_state_bytes=config.event_max_state_bytes,
+            max_payload_bytes=config.event_max_payload_bytes,
+            max_cursor_bytes=config.event_max_cursor_bytes,
+            max_error_bytes=config.event_max_error_bytes,
+            graph_max_nodes=config.event_graph_max_nodes,
+            graph_max_edges=config.event_graph_max_edges,
+            graph_max_fanout=config.event_graph_max_fanout,
+            graph_max_depth=config.event_graph_max_depth,
+            graph_max_invalidation_nodes=(
+                config.event_graph_max_invalidation_nodes
+            ),
+            allowed_webhooks=allowed_webhooks,
+        )
+    return engine
+
+
 def _hash_password() -> int:
     password = getpass.getpass("Password: ")
     confirmation = getpass.getpass("Confirm password: ")
@@ -554,14 +907,14 @@ def _hash_password() -> int:
     return 0
 
 
-def _init_users(path: str, username: str) -> int:
+def _init_users(path: str, username: str, tenant_id: str = "default") -> int:
     password = getpass.getpass("Password for {}: ".format(username))
     confirmation = getpass.getpass("Confirm password: ")
     if password != confirmation:
         print("mc: passwords do not match", file=sys.stderr)
         return 1
     try:
-        write_example_users_file(path, username, password)
+        write_example_users_file(path, username, password, tenant_id)
     except (OSError, ValueError) as exc:
         print("mc: {}".format(exc), file=sys.stderr)
         return 1

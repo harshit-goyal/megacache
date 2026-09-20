@@ -230,6 +230,30 @@ class OriginTests(unittest.TestCase):
         self.assertTrue(refreshed.wait(1))
         self.assertEqual(b"two", service.get("key").value)
 
+    def test_background_refresh_can_be_drained_for_managed_restore(self):
+        refreshed = threading.Event()
+        responses = [OriginResponse(200, b"one"), OriginResponse(200, b"two")]
+
+        def transport(origin, path, addresses):
+            response = responses.pop(0)
+            if response.body == b"two":
+                refreshed.set()
+            return response
+
+        service = self.service(
+            CacheEngine(clock=self.clock), make_origin(), transport
+        )
+        service.fetch("key", "catalog", "/v1/key")
+        service.pause_background_work(1)
+        self.clock.advance(8)
+        self.assertEqual(
+            "fresh", service.fetch("key", "catalog", "/v1/key").state
+        )
+        self.assertFalse(refreshed.wait(0.05))
+        service.resume_background_work()
+        self.assertTrue(refreshed.wait(1))
+        self.assertEqual(b"two", service.get("key").value)
+
     def test_negative_responses_are_cached_without_becoming_get_values(self):
         responses = [OriginResponse(404, b""), OriginResponse(200, b"found")]
         calls = []

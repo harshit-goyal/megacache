@@ -3,7 +3,7 @@
 import math
 import os
 import socket
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Tuple
 
 
@@ -158,6 +158,18 @@ class Config:
     experiment_min_samples: int = 100
     experiment_max_miss_regression: float = 0.05
     intelligence_state_file: Optional[str] = "megacache-intelligence-state.json"
+    control_plane_file: Optional[str] = None
+    control_state_directory: str = "megacache-control-state"
+    control_master_key: Optional[str] = field(default=None, repr=False)
+    control_key_file: Optional[str] = None
+    control_state_max_bytes: int = 16_777_216
+    control_max_tenants: int = 100
+    control_max_usage_periods: int = 744
+    control_max_operations: int = 1_000
+    control_audit_segment_bytes: int = 1_048_576
+    control_audit_max_segments: int = 32
+    control_artifact_max_bytes: int = 134_217_728
+    control_scheduler_interval_seconds: float = 30.0
 
     def __post_init__(self) -> None:
         if (
@@ -230,6 +242,17 @@ class Config:
             or self.experiment_min_samples <= 0
             or not math.isfinite(self.experiment_max_miss_regression)
             or self.experiment_max_miss_regression < 0
+            or not isinstance(self.control_state_directory, str)
+            or not self.control_state_directory
+            or self.control_state_max_bytes <= 0
+            or self.control_max_tenants <= 0
+            or self.control_max_usage_periods <= 0
+            or self.control_max_operations <= 0
+            or self.control_audit_segment_bytes <= 0
+            or self.control_audit_max_segments <= 0
+            or self.control_artifact_max_bytes <= 0
+            or not math.isfinite(self.control_scheduler_interval_seconds)
+            or self.control_scheduler_interval_seconds <= 0
         ):
             raise ValueError("configured capacity limits are invalid")
         if self.eviction_policy not in ("lru", "cost"):
@@ -257,6 +280,16 @@ class Config:
             raise ValueError(
                 "enabled experiments require an intelligence state file"
             )
+        if self.control_plane_file is not None:
+            if self.users_file is None:
+                raise ValueError(
+                    "managed control plane requires MEGACACHE_USERS_FILE"
+                )
+            if bool(self.control_master_key) == bool(self.control_key_file):
+                raise ValueError(
+                    "managed control plane requires exactly one of "
+                    "MEGACACHE_CONTROL_MASTER_KEY or MEGACACHE_CONTROL_KEY_FILE"
+                )
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -427,5 +460,38 @@ class Config:
                     "megacache-intelligence-state.json",
                 )
                 or None
+            ),
+            control_plane_file=_optional_path("MEGACACHE_CONTROL_PLANE_FILE"),
+            control_state_directory=os.getenv(
+                "MEGACACHE_CONTROL_STATE_DIRECTORY",
+                "megacache-control-state",
+            ),
+            control_master_key=(
+                os.getenv("MEGACACHE_CONTROL_MASTER_KEY") or None
+            ),
+            control_key_file=_optional_path("MEGACACHE_CONTROL_KEY_FILE"),
+            control_state_max_bytes=_positive_int(
+                "MEGACACHE_CONTROL_STATE_MAX_BYTES", 16_777_216
+            ),
+            control_max_tenants=_positive_int(
+                "MEGACACHE_CONTROL_MAX_TENANTS", 100
+            ),
+            control_max_usage_periods=_positive_int(
+                "MEGACACHE_CONTROL_MAX_USAGE_PERIODS", 744
+            ),
+            control_max_operations=_positive_int(
+                "MEGACACHE_CONTROL_MAX_OPERATIONS", 1_000
+            ),
+            control_audit_segment_bytes=_positive_int(
+                "MEGACACHE_CONTROL_AUDIT_SEGMENT_BYTES", 1_048_576
+            ),
+            control_audit_max_segments=_positive_int(
+                "MEGACACHE_CONTROL_AUDIT_MAX_SEGMENTS", 32
+            ),
+            control_artifact_max_bytes=_positive_int(
+                "MEGACACHE_CONTROL_ARTIFACT_MAX_BYTES", 134_217_728
+            ),
+            control_scheduler_interval_seconds=_positive_float(
+                "MEGACACHE_CONTROL_SCHEDULER_INTERVAL_SECONDS", 30.0
             ),
         )

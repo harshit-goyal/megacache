@@ -18,7 +18,7 @@ import (
 	"unicode/utf8"
 )
 
-const Version = "0.9.0"
+const Version = "1.0.0"
 const (
 	maxResponseBytes = 16 * 1024 * 1024
 	maxBulkBytes = 16 * 1024 * 1024

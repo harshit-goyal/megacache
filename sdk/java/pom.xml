@@ -5,7 +5,7 @@
   <modelVersion>4.0.0</modelVersion>
   <groupId>io.megacache</groupId>
   <artifactId>megacache-client</artifactId>
-  <version>0.9.0</version>
+  <version>1.0.0</version>
   <name>MegaCache Java SDK</name>
   <description>Dependency-free RESP2 and bounded L1 client for MegaCache</description>
   <licenses>

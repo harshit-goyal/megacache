@@ -1,13 +1,11 @@
 # Versioning policy
 
 MegaCache follows Semantic Versioning 2.0.0 for the server, wire extensions,
-and all supported SDKs. Version 0.9.0 keeps the SDKs in lockstep with the
-server.
+and all supported SDKs. Version 1.0.0 keeps the SDKs in lockstep with the
+server and is the first stable protocol/API compatibility line.
 
-Before 1.0, a minor release may make incompatible API changes only when the
-release notes and migration guidance call them out. Patch releases preserve
-documented APIs and protocol behavior. After 1.0, incompatible changes require
-a major release.
+Patch releases preserve documented APIs and protocol behavior. After 1.0,
+incompatible changes require a major release.
 
 The supported RESP2 subset is additive within a major version. Existing
 commands, response shapes, error categories, and defaults are not removed or

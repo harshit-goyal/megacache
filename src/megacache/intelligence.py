@@ -12,6 +12,7 @@ import logging
 import math
 import os
 import secrets
+import stat
 import threading
 import time
 from collections import OrderedDict, defaultdict
@@ -908,9 +909,20 @@ class CacheIntelligence:
         if not self.state_file or not os.path.exists(self.state_file):
             return
         try:
-            if os.path.getsize(self.state_file) > 1_048_576:
+            metadata = os.lstat(self.state_file)
+            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(
+                metadata.st_mode
+            ):
+                raise ValueError("intelligence state must be a regular file")
+            if metadata.st_size > 1_048_576:
                 raise ValueError("intelligence state exceeds size limit")
-            with open(self.state_file, "r", encoding="utf-8") as handle:
+            descriptor = os.open(
+                self.state_file,
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+            )
+            with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
                 document = json.load(handle)
             if (
                 isinstance(document, dict)
@@ -924,7 +936,7 @@ class CacheIntelligence:
                 audit = document.get("audit", [])
                 if isinstance(audit, list):
                     self._audit = audit[-100:]
-        except (OSError, ValueError, TypeError):
+        except (OSError, UnicodeDecodeError, ValueError, TypeError):
             self._metrics["intelligence_state_load_errors_total"] += 1
 
     def _save_state_locked(self) -> None:

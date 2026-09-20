@@ -1,4 +1,4 @@
-# MegaCache Python SDK 0.9
+# MegaCache Python SDK 1.0
 
 The Python 3.9+ SDK ships in the root `megacache` package and has no runtime
 dependencies. `MegaCacheClient` supports common RESP2 operations, typed

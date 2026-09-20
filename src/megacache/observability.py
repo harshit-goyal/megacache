@@ -13,6 +13,7 @@ _EXTRA_FIELDS = (
     "duration_ms",
     "remote",
     "username",
+    "tenant_namespace",
     "traceparent",
     "event_source",
     "event_stream",
@@ -21,6 +22,7 @@ _EXTRA_FIELDS = (
     "reason",
     "replicas_added",
     "distribution_scope",
+    "operation_id",
 )
 _TRACEPARENT_RE = re.compile(
     r"^(?!ff)[0-9a-f]{2}-(?!0{32})[0-9a-f]{32}-(?!0{16})[0-9a-f]{16}-[0-9a-f]{2}$"

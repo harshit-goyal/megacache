@@ -17,7 +17,7 @@ behind appropriate network controls; use a TCP TLS proxy for RESP when traffic
 crosses a trusted boundary. The process runs as an unprivileged user in the
 supplied container, logs requests to standard output, and shuts down cleanly.
 
-Version 0.9's cluster is in-process. A comma-separated
+Version 1.0's cluster is in-process. A comma-separated
 `MEGACACHE_CLUSTER_NODES` value creates independent logical storage nodes
 managed by one coordinator. This is useful for embedded operation, exercising
 replication behavior, and validating failure procedures, but it is not a
@@ -40,6 +40,62 @@ Plan process memory for their sum plus transfer buffers.
 Origin singleflight is cluster-wide only inside this one coordinator object.
 Running the same origin file in multiple processes creates independent
 singleflight tables, retry budgets, breakers, and concurrency budgets.
+
+## Managed control-plane operation
+
+Managed mode is opt-in. Copy `control-plane.example.json`, assign every named
+user a tenant and control roles, and configure protected durable state plus one
+key source:
+
+```bash
+export MEGACACHE_CONTROL_PLANE_FILE="$PWD/control-plane.json"
+export MEGACACHE_CONTROL_STATE_DIRECTORY="/var/lib/megacache/control"
+export MEGACACHE_USERS_FILE="/run/secrets/megacache-users.json"
+export MEGACACHE_CONTROL_MASTER_KEY='BASE64_32_TO_64_BYTE_KEY'
+mc serve
+```
+
+The sum of tenant entry and byte quotas must fit within the per-logical-node
+`MEGACACHE_MAX_ENTRIES`/`MEGACACHE_MAX_MEMORY_BYTES`. Each tenant gets its own
+in-process engine stack, which prevents another tenant from consuming its
+entry budget or choosing its eviction victims. Per-tenant operation,
+connection, and origin-concurrency limits reject excess work before dispatch.
+These controls do not replace OS/container CPU, memory, I/O, or network
+isolation.
+
+The state directory is mode `0700`; files are mode `0600`. Place it on durable
+local storage. One process holds the advisory owner lock. Do not share it over
+an eventually consistent filesystem. Alert on:
+
+- `control_plane_meter_persistence_errors_total`;
+- operation/connection quota rejections;
+- `rpo_at_risk` and `deployment_drift` dashboard alerts;
+- audit segment usage approaching `MEGACACHE_CONTROL_AUDIT_MAX_SEGMENTS`; and
+- failed asynchronous backup, restore, drill, export, or deletion operations.
+
+Control state failure does not stop a healthy tenant cache path. This
+availability choice can create a bounded reconciliation gap, so alert and
+repair the state volume promptly.
+
+Audit segments are never discarded automatically. Export and durably archive
+the unfiltered chain, then run `mc audit-prune SEQUENCE HASH --yes`; only whole
+segments covered by that exact verified boundary are removed, and a signed
+anchor preserves continuity.
+
+The in-process scheduler creates due local encrypted backups and applies
+configured backup/export/operation retention. Copy backup artifacts to durable
+remote storage externally. Before restore, run `mc restore-validate`; restore
+requires its short-lived token, exact tenant confirmation, and `--yes`.
+`mc dr-drill` performs a local scratch restore and records measured RPO/RTO.
+It does not exercise a real region.
+
+Desired and observed deployment metadata is available through
+`mc deployment-status`, `mc deployment-set`, and
+`mc deployment-observe`. An external orchestrator must watch and apply it.
+Setting `drain` or a target version records intent only.
+
+See [Self-hosted managed control plane](control-plane.md) for the complete
+configuration, RBAC, audit, billing, backup, and privacy contracts.
 
 ## Freshness event configuration
 
@@ -201,9 +257,15 @@ Scrape `/metrics` and alert on:
   `megacache_intelligence_telemetry_evictions_total`,
   `megacache_intelligence_hot_replications_total`, and
   `megacache_intelligence_experiment_rollbacks_total`.
+- `megacache_control_plane_meter_persistence_errors_total`,
+  `megacache_control_plane_quota_rejections_total`,
+  `megacache_control_plane_connection_rejections_total`, and audit-segment
+  capacity from `mc control-status`.
 
-Counters reset at process restart. `entries`, `tags`, and `active_leases` are
-gauges; other exported values are cumulative counters.
+Data-plane and Prometheus counters reset at process restart. Managed hourly
+usage and billing sequence ranges are durable. `entries`, `tags`, and
+`active_leases` are gauges; other exported data-plane values are cumulative
+counters for the current process.
 
 Logs use one JSON object per line by default. Set
 `MEGACACHE_LOG_FORMAT=text` for local human-readable output. Request logs never
@@ -247,13 +309,13 @@ Snapshot sessions enforce
 `MEGACACHE_SNAPSHOT_CHUNK_BYTES`, and
 `MEGACACHE_SNAPSHOT_MAX_IN_FLIGHT`.
 
-There is no native node RPC in 0.9. Real packet loss, asymmetric partitions,
+There is no native node RPC in 1.0. Real packet loss, asymmetric partitions,
 cross-host clocks, and process split brain are outside implemented behavior.
 
 Treat MegaCache as optional infrastructure. Clients should enforce short
 timeouts and fall back to the authoritative origin when it is unavailable.
 Rate-limit that fallback to avoid transferring a cache outage to the origin.
 
-Because version 0.9 cache entries are in-memory, rolling restarts begin cold. Warm critical
+Because version 1.0 cache entries are in-memory, rolling restarts begin cold. Warm critical
 keys gradually with `mc fetch`; the same admission and origin protection
 policies apply to warming.

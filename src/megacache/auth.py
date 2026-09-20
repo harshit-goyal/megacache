@@ -6,6 +6,7 @@ import hmac
 import json
 import os
 import secrets
+import stat
 import threading
 import time
 from collections import OrderedDict
@@ -14,6 +15,15 @@ from typing import FrozenSet, Iterable, Optional
 
 _PBKDF2_ITERATIONS = 600_000
 _PERMISSIONS = frozenset(("read", "write", "invalidate", "admin"))
+_ROLES = frozenset(
+    (
+        "tenant_admin",
+        "platform_admin",
+        "operator",
+        "auditor",
+        "billing_admin",
+    )
+)
 _PASSWORD_VERIFY_SLOTS = threading.BoundedSemaphore(4)
 
 
@@ -22,6 +32,8 @@ class Principal:
     username: str
     permissions: FrozenSet[str]
     key_prefixes: tuple
+    tenant_id: str = "default"
+    roles: FrozenSet[str] = frozenset()
 
     def allows(self, permission: str, keys: Iterable[str] = ()) -> bool:
         if "admin" not in self.permissions and permission not in self.permissions:
@@ -33,6 +45,14 @@ class Principal:
             for key in keys
         )
 
+    def has_role(self, role: str) -> bool:
+        return role in self.roles or "platform_admin" in self.roles
+
+    def manages_tenant(self, tenant_id: str) -> bool:
+        return self.has_role("platform_admin") or (
+            "tenant_admin" in self.roles and self.tenant_id == tenant_id
+        )
+
 
 @dataclass(frozen=True)
 class _User:
@@ -40,14 +60,34 @@ class _User:
     password_hash: str
     permissions: FrozenSet[str]
     key_prefixes: tuple
+    tenant_id: str
+    roles: FrozenSet[str]
 
 
 class AuthManager:
     def __init__(
-        self, api_key: Optional[str] = None, users_file: Optional[str] = None
+        self,
+        api_key: Optional[str] = None,
+        users_file: Optional[str] = None,
+        *,
+        default_tenant: str = "default",
+        allowed_tenants: Optional[Iterable[str]] = None,
     ) -> None:
         self._api_key = api_key
         self._users_configured = users_file is not None
+        self._default_tenant = self._validate_tenant_id(default_tenant)
+        self._allowed_tenants = (
+            None
+            if allowed_tenants is None
+            else frozenset(
+                self._validate_tenant_id(value) for value in allowed_tenants
+            )
+        )
+        if (
+            self._allowed_tenants is not None
+            and self._default_tenant not in self._allowed_tenants
+        ):
+            raise ValueError("default tenant is not configured")
         self._users = self._load_users(users_file)
         self._success_cache = OrderedDict()
         self._cache_lock = threading.Lock()
@@ -59,7 +99,13 @@ class AuthManager:
     def anonymous(self) -> Optional[Principal]:
         if self.required:
             return None
-        return Principal("anonymous", frozenset(("admin",)), ())
+        return Principal(
+            "anonymous",
+            frozenset(("admin",)),
+            (),
+            self._default_tenant,
+            frozenset(("tenant_admin",)),
+        )
 
     def authenticate(
         self, username: Optional[str], password: str
@@ -69,7 +115,21 @@ class AuthManager:
             and username in (None, "default")
             and hmac.compare_digest(password, self._api_key)
         ):
-            return Principal("legacy-api-key", frozenset(("admin",)), ())
+            return Principal(
+                "legacy-api-key",
+                frozenset(("admin",)),
+                (),
+                self._default_tenant,
+                frozenset(
+                    (
+                        "tenant_admin",
+                        "platform_admin",
+                        "operator",
+                        "auditor",
+                        "billing_admin",
+                    )
+                ),
+            )
         if username is None:
             return None
         user = self._users.get(username)
@@ -94,7 +154,13 @@ class AuthManager:
                 return None
         finally:
             _PASSWORD_VERIFY_SLOTS.release()
-        principal = Principal(user.username, user.permissions, user.key_prefixes)
+        principal = Principal(
+            user.username,
+            user.permissions,
+            user.key_prefixes,
+            user.tenant_id,
+            user.roles,
+        )
         with self._cache_lock:
             self._success_cache[cache_key] = (now + 60, principal)
             self._success_cache.move_to_end(cache_key)
@@ -102,14 +168,26 @@ class AuthManager:
                 self._success_cache.popitem(last=False)
         return principal
 
-    @staticmethod
-    def _load_users(path: Optional[str]) -> dict:
+    def _load_users(self, path: Optional[str]) -> dict:
         if path is None:
             return {}
         try:
-            with open(path, "r", encoding="utf-8") as source:
+            metadata = os.lstat(path)
+            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(
+                metadata.st_mode
+            ):
+                raise ValueError("users file must be a regular file")
+            if metadata.st_size > 1_048_576:
+                raise ValueError("users file exceeds size limit")
+            descriptor = os.open(
+                path,
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+            )
+            with os.fdopen(descriptor, "r", encoding="utf-8") as source:
                 document = json.load(source)
-        except (OSError, json.JSONDecodeError) as exc:
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ValueError(
                 "unable to load MEGACACHE_USERS_FILE: {}".format(exc)
             ) from exc
@@ -127,18 +205,42 @@ class AuthManager:
             password_hash = value.get("password_hash")
             permissions = value.get("permissions", [])
             prefixes = value.get("key_prefixes", [])
+            tenant_id = value.get("tenant_id", self._default_tenant)
+            roles = value.get("roles")
             if (
                 not isinstance(username, str)
                 or not username
                 or not isinstance(password_hash, str)
                 or not isinstance(permissions, list)
                 or not isinstance(prefixes, list)
+                or (roles is not None and not isinstance(roles, list))
                 or any(not isinstance(item, str) or not item for item in prefixes)
             ):
                 raise ValueError("invalid user definition")
             permission_set = frozenset(permissions)
-            if not permission_set or not permission_set.issubset(_PERMISSIONS):
-                raise ValueError("user has invalid or empty permissions")
+            if not permission_set.issubset(_PERMISSIONS):
+                raise ValueError("user has invalid permissions")
+            role_set = frozenset(
+                (
+                    ("tenant_admin",)
+                    if roles is None and "admin" in permission_set
+                    else (() if roles is None else roles)
+                )
+            )
+            if roles is not None and len(role_set) != len(roles):
+                raise ValueError("user roles must not contain duplicates")
+            if not role_set.issubset(_ROLES):
+                raise ValueError("user has invalid roles")
+            if not permission_set and not role_set:
+                raise ValueError("user has no permissions or roles")
+            normalized_tenant = self._validate_tenant_id(tenant_id)
+            if (
+                self._allowed_tenants is not None
+                and normalized_tenant not in self._allowed_tenants
+            ):
+                raise ValueError(
+                    "user '{}' references an unknown tenant".format(username)
+                )
             if username in users:
                 raise ValueError("duplicate user '{}'".format(username))
             validate_password_hash(password_hash)
@@ -147,8 +249,26 @@ class AuthManager:
                 password_hash,
                 permission_set,
                 tuple(prefixes),
+                normalized_tenant,
+                role_set,
             )
         return users
+
+    @staticmethod
+    def _validate_tenant_id(value: object) -> str:
+        if (
+            not isinstance(value, str)
+            or not value
+            or len(value.encode("utf-8")) > 128
+            or value[0] not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+            or any(
+                character
+                not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+                for character in value
+            )
+        ):
+            raise ValueError("tenant_id must be a 1-128 character identifier")
+        return value
 
 
 def hash_password(password: str, iterations: int = _PBKDF2_ITERATIONS) -> str:
@@ -191,14 +311,23 @@ def validate_password_hash(encoded: str) -> tuple:
     return iterations, salt, digest
 
 
-def write_example_users_file(path: str, username: str, password: str) -> None:
+def write_example_users_file(
+    path: str,
+    username: str,
+    password: str,
+    tenant_id: str = "default",
+) -> None:
+    normalized_tenant = AuthManager._validate_tenant_id(tenant_id)
     document = {
+        "version": 2,
         "users": [
             {
                 "username": username,
                 "password_hash": hash_password(password),
                 "permissions": ["admin"],
                 "key_prefixes": [],
+                "tenant_id": normalized_tenant,
+                "roles": ["tenant_admin"],
             }
         ]
     }

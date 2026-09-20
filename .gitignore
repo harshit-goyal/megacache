@@ -12,6 +12,9 @@ events-state.json
 megacache-events-state.json
 megacache-intelligence-state.json
 megacache-intelligence-state.json.next
+control-plane.json
+control-keys.json
+megacache-control-state/
 build/
 dist/
 /sdk/java/target/

@@ -209,7 +209,7 @@ miss-regression guardrails, a bounded local audit, and automatic rollback.
 Per-key/class telemetry, simulations, recommendations, and audit history all
 have explicit limits, and keys/classes are not exported as metric labels.
 
-## Phase 7: managed control plane
+## Phase 7: managed control plane — self-hosted foundation complete in 1.0
 
 Deliverables:
 
@@ -222,9 +222,66 @@ Deliverables:
 - Control-plane API, web dashboard, alerting, and audit logs
 - Data retention, deletion, export, and compliance controls
 
+For the self-hosted 1.0 scope, the "dashboard" is the authenticated JSON
+status/API and native CLI output; no visual or hosted dashboard is claimed.
+"Compliance controls" means concrete retention/export/deletion mechanisms and
+audit evidence, not certification.
+
 Acceptance criteria:
 
 - Tenant isolation is covered by independent security testing.
 - Metering is reconcilable and idempotent.
 - Regional recovery objectives are continuously exercised.
 - Control-plane failure does not interrupt healthy data-plane traffic.
+
+Version 1.0 implements the self-hosted foundation with independent in-process
+data-plane stacks per authenticated tenant. The existing key-prefix policy is
+applied inside that tenant boundary. Keys, tags, origin definitions and
+budgets, event state, invalidation cursors, intelligence telemetry, and
+eviction are not shared or enumerable across tenants. Configured tenant entry
+and byte limits must fit within each logical node's configured bounds; token buckets,
+connection admission, and tenant-specific origin concurrency provide bounded
+noisy-neighbor controls.
+
+Hourly usage counters are atomically persisted with sequence ranges and
+bounded retention. Canonically sorted billing batches have deterministic IDs
+and use a replaceable provider protocol; no commercial provider is bundled.
+Administrative actions use rotating append-only JSONL segments with an
+HMAC-SHA256 hash chain and startup verification.
+
+The control plane schedules encrypted local backups, enforces backup/export
+retention, validates artifacts against tenant identity and quota before
+restore, requires a short-lived validation token for replacement restore, and
+records non-mutating recovery drills against declared RPO/RTO. A replaceable
+key-provider protocol supports a protected local keyring or environment key.
+The dependency-free encrypted envelope uses purpose-separated HMAC-SHA256
+keys, a random nonce, a PRF stream, and encrypt-then-MAC authentication.
+
+Desired and observed regional deployment records include generations, target
+versions, rolling strategy, maximum unavailable instances, and drain state.
+They are intentionally metadata for an external orchestrator. HTTP, RESP, and
+native `mc` control commands expose a JSON dashboard, operations, audit,
+billing export, backup/restore/drill, deployment, data export, and guarded
+tenant deletion. Control roles are separate from tenant data permissions.
+
+The self-hosted foundation has automated protocol-isolation,
+metering/billing, tamper-detection, restart, and local restore/drill coverage.
+Control-state or meter write failure is reported while healthy cache traffic
+remains available. Independent third-party security testing and continuously
+exercised real regional recovery are deployment validation activities, not
+claims made by this repository.
+
+Not included, and not claimed complete:
+
+- a hosted dashboard or managed SaaS;
+- an external orchestrator or actual regional provisioning/failover;
+- a real billing-provider adapter;
+- a cloud/HSM KMS adapter;
+- compliance certification or guaranteed physical secure erase;
+- authenticated inter-process data-plane transport or independent failure
+  domains.
+
+All tenant engines and logical replicas still run in one process. Operators
+must use separate processes/containers for hard OS-level resource or failure
+isolation and must externally copy encrypted backups to achieve regional
+durability.
