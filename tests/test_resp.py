@@ -6,6 +6,7 @@ import logging
 
 from megacache.config import Config
 from megacache.engine import CacheEngine
+from megacache.intelligence import CacheIntelligence
 from megacache.resp import MegaCacheRespServer
 
 
@@ -87,7 +88,9 @@ class RespServerTests(unittest.TestCase):
             users_file=None,
             log_format="text",
         )
-        cls.engine = CacheEngine(max_entries=100)
+        cls.engine = CacheIntelligence(
+            CacheEngine(max_entries=100), enabled=True
+        )
         cls.server = MegaCacheRespServer(("127.0.0.1", 0), config, cls.engine)
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
         cls.thread.start()
@@ -152,6 +155,40 @@ class RespServerTests(unittest.TestCase):
             ),
         )
         self.assertEqual(b"refreshed", self.client.command("GET", "product:1"))
+
+    def test_explain_recommendations_simulation_and_experiments(self):
+        self.authenticate()
+        self.assertEqual("OK", self.client.command("SET", "item:1", "value"))
+        self.client.command("GET", "item:1")
+        explanation = json.loads(
+            self.client.command("MC.EXPLAIN", "item:1")
+        )
+        self.assertEqual("fresh", explanation["current"]["state"])
+        recommendations = json.loads(
+            self.client.command("MC.RECOMMENDATIONS", 10)
+        )
+        self.assertLessEqual(len(recommendations["recommendations"]), 10)
+        simulation = json.loads(
+            self.client.command(
+                "MC.POLICY.SIMULATE",
+                json.dumps(
+                    {
+                        "records": [
+                            {
+                                "key": "item:1",
+                                "base_ttl_seconds": 60,
+                                "accesses": 1,
+                                "loads": 1,
+                                "changes": 0,
+                            }
+                        ]
+                    }
+                ),
+            )
+        )
+        self.assertTrue(simulation["dry_run"])
+        experiments = json.loads(self.client.command("MC.EXPERIMENTS"))
+        self.assertEqual("disabled", experiments["status"])
 
     def test_select_and_hello_resp2(self):
         self.authenticate()

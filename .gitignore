@@ -10,6 +10,8 @@ users.json
 events.json
 events-state.json
 megacache-events-state.json
+megacache-intelligence-state.json
+megacache-intelligence-state.json.next
 build/
 dist/
 /sdk/java/target/

@@ -28,6 +28,13 @@ storage API and adds normalized event ingestion, webhook authentication,
 durable checkpoints, idempotency, dead letters, dependency traversal, and
 event metrics. It can wrap `OriginCache`, `ClusterStorage`, or `CacheEngine`.
 
+Version 0.9 inserts `CacheIntelligence` between coordination and origin
+protection. It observes storage outcomes through the existing API, retains
+LRU-bounded per-key and per-class counters, supplies adaptive TTL and refresh
+priority decisions to `OriginCache`, and exposes explain, recommendation,
+simulation, and experiment status methods through every facade. It does not
+retain values; content-change detection keeps only SHA-256 digests.
+
 ## Distributed coordination
 
 `ClusterStorage` is a well-defined in-process coordinator. Every node has a
@@ -114,6 +121,16 @@ has an estimated byte cost covering its encoded key, value, tags, and fixed
 metadata. Entries above the per-entry limit are rejected before mutation;
 otherwise LRU entries are removed until both entry-count and byte limits are
 satisfied.
+
+LRU remains the default eviction policy. The opt-in `cost` policy chooses the
+lowest deterministic score derived from entry bytes, idle time, access count,
+and measured load latency. It uses only bounded fields stored on each entry and
+retains the same atomic capacity checks and rollback journals.
+
+Hot-key copies are optional replicas beyond normal owners. `ClusterStorage`
+uses one only when its metadata equals the latest known version, never counts
+it toward quorum, and reports it separately from configured replicas. These
+copies exist only across logical nodes in the same process.
 
 Plain RESP `SET` creates a persistent entry, matching Redis expiration
 semantics, although it remains subject to LRU capacity eviction and process
@@ -224,6 +241,12 @@ JSON by default and include protocol, operation, status, duration, remote
 address, and authenticated username without recording keys, values, passwords,
 or command arguments.
 
+Intelligence metrics contain only bounded aggregate counters and gauges:
+tracked key/class counts, telemetry evictions, hot-copy updates, policy
+mutations, and experiment rollbacks. Cache keys and derived classes are never
+Prometheus labels. Automated rollback logs contain the experiment ID and
+aggregate rates, not cache keys or values.
+
 ## Stampede prevention
 
 Embedded users can call `CacheEngine.get_or_load`. One caller executes the
@@ -259,7 +282,7 @@ deployed processes have independent flights and can each contact the origin.
 
 ## Explicit non-guarantees
 
-Version 0.8 does not ship a node discovery service or authenticated,
+Version 0.9 does not ship a node discovery service or authenticated,
 encrypted node-to-node RPC transport. `MEGACACHE_CLUSTER_NODES` creates
 multiple logical stores inside one process; loss of that process loses every
 logical node and all cache data. The coordinator interfaces can model missing
@@ -272,10 +295,14 @@ Entries are not persisted. Restarting the process empties the cache. Use the
 coordinator as an embedded/testable distributed state machine until a secure
 transport implements the same interfaces.
 
-HTTP origin and event definitions are loaded only at startup. Version 0.8 has
+HTTP origin and event definitions are loaded only at startup. Version 0.9 has
 no database or Kafka wire client and no credential-refresh mechanism for fixed
 origin headers or webhook secrets.
 Refresh workers and singleflight state are in-process and are lost at restart.
+
+Intelligence telemetry and hot-key classification are in-memory and reset at
+restart. Only bounded experiment rollback decisions are persisted, and that
+local atomic JSON file is not replicated or coordinated across processes.
 
 The event state file is durable and atomically replaced, but it is not a
 multi-process consensus store. Exactly one MegaCache process may own it;

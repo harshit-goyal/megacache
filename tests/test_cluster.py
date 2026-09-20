@@ -76,6 +76,17 @@ class DroppingRestoreEngine(CacheEngine):
         return len(tuple(entries))
 
 
+class FailingGetEngine(CacheEngine):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fail_get = False
+
+    def get(self, key):
+        if self.fail_get:
+            raise ValueError("simulated replica read failure")
+        return super().get(key)
+
+
 class ClusterTests(unittest.TestCase):
     def make_cluster(self, consistency="majority", **kwargs):
         self.clock = FakeClock()
@@ -558,6 +569,87 @@ class ClusterTests(unittest.TestCase):
         self.assertEqual("value", cluster.get("key").value)
         self.assertEqual("value", self.stores[first_owner].get("key").value)
         self.assertGreaterEqual(cluster.stats()["read_repairs_total"], 1)
+
+    def test_explain_skips_first_owner_physical_miss_for_live_replica(self):
+        cluster = self.make_cluster()
+        cluster.put("key", "value")
+        first_owner = cluster.ring.owners("key", 3)[0]
+        self.stores[first_owner].delete("key")
+        before = {
+            node_id: storage.stats()
+            for node_id, storage in self.stores.items()
+        }
+
+        explanation = cluster.explain_entry("key")
+
+        self.assertEqual("fresh", explanation["state"])
+        self.assertTrue(explanation["present"])
+        self.assertEqual(
+            "miss",
+            self.stores[first_owner].explain_entry("key")["state"],
+        )
+        for node_id, storage in self.stores.items():
+            after = storage.stats()
+            self.assertEqual(
+                before[node_id].get("hits_total", 0),
+                after.get("hits_total", 0),
+            )
+            self.assertEqual(
+                before[node_id].get("misses_total", 0),
+                after.get("misses_total", 0),
+            )
+
+    def test_stale_and_evicted_hot_replicas_are_pruned_without_masking_owner(self):
+        clock = FakeClock()
+        stores = {
+            name: CacheEngine(max_entries=10, clock=clock)
+            for name in ("a", "b", "c")
+        }
+        cluster = ClusterStorage(
+            [ClusterNode(name, storage) for name, storage in stores.items()],
+            replica_count=1,
+            consistency="one",
+            clock=clock,
+        )
+        cluster.put("key", "v1")
+        self.assertEqual(1, cluster.replicate_hot_key("key"))
+        stale_hot = cluster.ownership("key")["hot_replicas"][0]
+        cluster.put("key", "v2")
+
+        self.assertEqual("v2", cluster.get("key").value)
+        self.assertNotIn(stale_hot, cluster.ownership("key")["hot_replicas"])
+        self.assertEqual("miss", stores[stale_hot].get("key").state)
+
+        self.assertEqual(1, cluster.replicate_hot_key("key"))
+        evicted_hot = cluster.ownership("key")["hot_replicas"][0]
+        stores[evicted_hot].delete("key")
+
+        self.assertEqual("v2", cluster.get("key").value)
+        self.assertNotIn(evicted_hot, cluster.ownership("key")["hot_replicas"])
+        self.assertNotIn("key", cluster._metadata[evicted_hot])
+
+    def test_hot_replica_miss_never_counts_toward_owner_read_quorum(self):
+        clock = FakeClock()
+        stores = {
+            name: FailingGetEngine(max_entries=10, clock=clock)
+            for name in ("a", "b", "c")
+        }
+        cluster = ClusterStorage(
+            [ClusterNode(name, storage) for name, storage in stores.items()],
+            replica_count=2,
+            consistency="all",
+            clock=clock,
+        )
+        cluster.put("key", "value")
+        self.assertEqual(1, cluster.replicate_hot_key("key"))
+        ownership = cluster.ownership("key")
+        hot = ownership["hot_replicas"][0]
+        stores[hot].delete("key")
+        stores[ownership["replicas"][1]].fail_get = True
+
+        with self.assertRaisesRegex(QuorumError, "required 2, received 1"):
+            cluster.get("key")
+        self.assertNotIn(hot, cluster.ownership("key")["hot_replicas"])
 
     def test_snapshot_cannot_overwrite_newer_target_version(self):
         cluster = self.make_cluster()

@@ -4,7 +4,7 @@ const net = require("node:net");
 const tls = require("node:tls");
 const { AsyncLocalStorage } = require("node:async_hooks");
 const { performance } = require("node:perf_hooks");
-const VERSION = "0.8.0";
+const VERSION = "0.9.0";
 const requestTraceparent = new AsyncLocalStorage();
 
 function elapsedSince(started) {

@@ -172,7 +172,7 @@ The shared conformance runner starts a real server and exercises every SDK.
 W3C `traceparent` is accepted without an OpenTelemetry dependency, attached to
 server observations, and forwarded to configured HTTP origins.
 
-## Phase 6: cache intelligence
+## Phase 6: cache intelligence — complete in 0.9
 
 Deliverables:
 
@@ -189,6 +189,25 @@ Acceptance criteria:
 - Automated policies can be disabled and rolled back immediately.
 - Every automated decision has an explanation and supporting metrics.
 - Simulations demonstrate no configured freshness-bound violations.
+
+Version 0.9 implements these features with bounded counters and deterministic
+formulas rather than an ML model. LRU and all automated policies remain the
+defaults unless explicitly enabled. Adaptive TTL applies to positive HTTP
+origin refreshes and can shorten, but never extend, the origin's declared TTL.
+Cost-aware eviction is an opt-in engine policy using estimated size, idle time,
+access count, and measured origin/load latency.
+
+Hot-key detection can create bounded extra copies only across logical nodes in
+the current in-process `ClusterStorage`; those copies do not count toward
+quorum or imply multi-host replication. Origin background work uses a bounded
+priority queue. Native CLI, HTTP, and RESP explain surfaces return reasons,
+evidence, lineage, current policy, and recommendations without cache values.
+
+Offline simulation accepts only a fixed JSON schema and never activates a
+policy. Experiments use stable SHA-256 key allocation, explicit sample and
+miss-regression guardrails, a bounded local audit, and automatic rollback.
+Per-key/class telemetry, simulations, recommendations, and audit history all
+have explicit limits, and keys/classes are not exported as metric labels.
 
 ## Phase 7: managed control plane
 

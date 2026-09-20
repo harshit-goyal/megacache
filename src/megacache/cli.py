@@ -19,6 +19,7 @@ from .config import Config
 from .coordination import MutationClock
 from .engine import CacheEngine
 from .events import load_event_automation
+from .intelligence import CacheIntelligence
 from .observability import configure_logging
 from .origin import OriginCache
 from .resp import MegaCacheRespServer
@@ -32,7 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Run and interact with MegaCache.",
     )
     parser.add_argument(
-        "--version", action="version", version="MegaCache 0.8.0"
+        "--version", action="version", version="MegaCache 0.9.0"
     )
     parser.add_argument(
         "--host",
@@ -115,6 +116,11 @@ def build_parser() -> argparse.ArgumentParser:
     get = commands.add_parser("get", help="read a cached value")
     get.add_argument("key")
 
+    explain = commands.add_parser(
+        "explain", help="explain current and recommended policy for a key"
+    )
+    explain.add_argument("key")
+
     fetch = commands.add_parser(
         "fetch", help="read through a configured HTTP origin"
     )
@@ -159,6 +165,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     commands.add_parser(
         "origins", help="show configured origin health and breaker state"
+    )
+    recommendations = commands.add_parser(
+        "recommendations", help="show bounded policy recommendations"
+    )
+    recommendations.add_argument("--limit", type=int, default=100)
+    simulate = commands.add_parser(
+        "policy-simulate", help="dry-run a policy against offline JSON records"
+    )
+    simulate.add_argument(
+        "path", nargs="?", default="-", help="simulation JSON path (default: stdin)"
+    )
+    commands.add_parser(
+        "experiments", help="show experiment allocation and guardrail status"
     )
     event = commands.add_parser(
         "event", help="ingest one freshness event from a JSON file or stdin"
@@ -265,6 +284,8 @@ def _execute(client: MegaCacheClient, args: argparse.Namespace) -> Any:
         return client.command(*parts)
     if command == "get":
         return client.command("GET", args.key)
+    if command == "explain":
+        return _decode_json_response(client.command("MC.EXPLAIN", args.key))
     if command == "fetch":
         parts = ["MC.FETCH", args.key, args.origin, args.path]
         if args.refresh:
@@ -295,6 +316,19 @@ def _execute(client: MegaCacheClient, args: argparse.Namespace) -> Any:
         return _decode_json_response(client.command("MC.STATUS"))
     if command == "origins":
         return _decode_json_response(client.command("MC.ORIGINS"))
+    if command == "recommendations":
+        return _decode_json_response(
+            client.command("MC.RECOMMENDATIONS", args.limit)
+        )
+    if command == "policy-simulate":
+        return _decode_json_response(
+            client.command(
+                "MC.POLICY.SIMULATE",
+                _read_json_document(args.path, "simulation"),
+            )
+        )
+    if command == "experiments":
+        return _decode_json_response(client.command("MC.EXPERIMENTS"))
     if args.command == "event":
         return _decode_json_response(
             client.command("MC.EVENT", _read_event(args.path))
@@ -337,11 +371,12 @@ def _serve(args: argparse.Namespace) -> int:
                 default_ttl_seconds=config.default_ttl_seconds,
                 default_stale_seconds=config.default_stale_seconds,
                 lease_seconds=config.lease_seconds,
+                eviction_policy=config.eviction_policy,
             ),
         )
         for node_id in config.cluster_nodes
     ]
-    engine = MutationClock(ClusterStorage(
+    cluster = ClusterStorage(
         nodes,
         replica_count=config.replica_count,
         virtual_nodes=config.virtual_nodes,
@@ -354,7 +389,29 @@ def _serve(args: argparse.Namespace) -> int:
         max_leases=config.max_entries,
         max_lease_memory_bytes=config.max_memory_bytes,
         max_retained_tombstones=config.max_retained_tombstones,
-    ))
+        max_hot_replica_keys=config.intelligence_max_keys,
+    )
+    engine = CacheIntelligence(
+        MutationClock(cluster),
+        enabled=config.intelligence_enabled,
+        adaptive_ttl=config.adaptive_ttl_enabled,
+        min_ttl_seconds=config.intelligence_min_ttl_seconds,
+        max_ttl_seconds=config.intelligence_max_ttl_seconds,
+        telemetry_max_keys=config.intelligence_max_keys,
+        telemetry_max_classes=config.intelligence_max_classes,
+        hot_key_threshold=config.hot_key_threshold,
+        hot_key_window_seconds=config.hot_key_window_seconds,
+        hot_key_extra_replicas=config.hot_key_extra_replicas,
+        experiment_enabled=config.experiment_enabled,
+        experiment_id=config.experiment_id,
+        experiment_allocation_percent=config.experiment_allocation_percent,
+        experiment_min_samples=config.experiment_min_samples,
+        experiment_max_miss_regression=(
+            config.experiment_max_miss_regression
+        ),
+        state_file=config.intelligence_state_file,
+        eviction_policy=config.eviction_policy,
+    )
     if config.origins_file is not None:
         engine = OriginCache.from_file(
             engine,
@@ -563,6 +620,10 @@ def _decode_json_response(value: Any) -> Any:
 
 
 def _read_event(path: str) -> bytes:
+    return _read_json_document(path, "event")
+
+
+def _read_json_document(path: str, kind: str) -> bytes:
     try:
         if path == "-":
             value = json.load(sys.stdin)
@@ -570,7 +631,9 @@ def _read_event(path: str) -> bytes:
             with open(path, "r", encoding="utf-8") as source:
                 value = json.load(source)
     except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError("unable to read event JSON: {}".format(exc)) from exc
+        raise ValueError(
+            "unable to read {} JSON: {}".format(kind, exc)
+        ) from exc
     if not isinstance(value, dict):
-        raise ValueError("event JSON must be an object")
+        raise ValueError("{} JSON must be an object".format(kind))
     return json.dumps(value, separators=(",", ":")).encode("utf-8")

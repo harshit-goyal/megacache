@@ -13,6 +13,10 @@ from typing import Any, Callable, Dict, FrozenSet, Iterable, Optional, Tuple
 from .storage import StorageEntry
 
 
+def _safe_lineage_path(value: Any) -> Any:
+    return value.split("?", 1)[0] if isinstance(value, str) else value
+
+
 @dataclass(frozen=True)
 class CacheResult:
     state: str
@@ -30,6 +34,10 @@ class _Entry:
     stale_until: float
     tags: FrozenSet[str]
     size_bytes: int
+    configured_ttl_seconds: Optional[float] = None
+    access_count: int = 0
+    last_access: float = 0.0
+    load_cost_ms: float = 0.0
 
 
 @dataclass
@@ -82,6 +90,7 @@ class CacheEngine:
         *,
         max_memory_bytes: int = 67_108_864,
         max_entry_bytes: int = 1_048_576,
+        eviction_policy: str = "lru",
     ) -> None:
         if min(
             max_entries,
@@ -92,9 +101,12 @@ class CacheEngine:
             lease_seconds,
         ) <= 0:
             raise ValueError("cache limits and durations must be greater than zero")
+        if eviction_policy not in ("lru", "cost"):
+            raise ValueError("eviction_policy must be lru or cost")
         self._max_entries = max_entries
         self._max_memory_bytes = max_memory_bytes
         self._max_entry_bytes = max_entry_bytes
+        self._eviction_policy = eviction_policy
         self._default_ttl = default_ttl_seconds
         self._default_stale = default_stale_seconds
         self._lease_seconds = lease_seconds
@@ -175,6 +187,10 @@ class CacheEngine:
                 self._metrics["rejected_entries_total"] += 1
                 raise ValueError("entry exceeds available cache memory")
 
+            existing = self._entries.get(key)
+            access_count = 0 if existing is None else existing.access_count
+            last_access = now if existing is None else existing.last_access
+            load_cost_ms = 0.0 if existing is None else existing.load_cost_ms
             self._remove_entry(key)
             self._entries[key] = _Entry(
                 value=stored_value,
@@ -182,6 +198,10 @@ class CacheEngine:
                 stale_until=now + ttl + stale,
                 tags=normalized_tags,
                 size_bytes=size_bytes,
+                configured_ttl_seconds=None if persistent else ttl,
+                access_count=access_count,
+                last_access=last_access,
+                load_cost_ms=load_cost_ms,
             )
             self._used_bytes += size_bytes
             for tag in normalized_tags:
@@ -285,6 +305,7 @@ class CacheEngine:
             deadline = self._clock() + ttl
             entry.fresh_until = deadline
             entry.stale_until = deadline
+            entry.configured_ttl_seconds = ttl
             self._metrics["expirations_set_total"] += 1
             return True
 
@@ -413,6 +434,8 @@ class CacheEngine:
                         stale_until=stale_until,
                         tags=tags,
                         size_bytes=size_bytes,
+                        configured_ttl_seconds=fresh_for,
+                        last_access=now,
                     )
                     self._used_bytes += size_bytes
                     for tag in tags:
@@ -739,7 +762,91 @@ class CacheEngine:
                 for (_, _, status), count in self._request_counts.items()
                 if status == "error"
             )
+            snapshot["cost_aware_eviction_enabled"] = int(
+                self._eviction_policy == "cost"
+            )
             return snapshot
+
+    def record_load_cost(self, key: str, duration_ms: float) -> None:
+        """Attach bounded origin/load cost evidence to a live entry."""
+        if (
+            isinstance(duration_ms, bool)
+            or not isinstance(duration_ms, (int, float))
+            or not math.isfinite(duration_ms)
+            or duration_ms < 0
+        ):
+            raise ValueError("duration_ms must be a finite non-negative number")
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is None:
+                return
+            value = min(float(duration_ms), 3_600_000.0)
+            entry.load_cost_ms = (
+                value
+                if entry.load_cost_ms == 0
+                else entry.load_cost_ms * 0.8 + value * 0.2
+            )
+
+    def explain_entry(self, key: str) -> Dict[str, Any]:
+        """Describe one entry without exposing its value or changing LRU order."""
+        self._validate_key(key)
+        with self._lock:
+            now = self._clock()
+            entry = self._entries.get(key)
+            if entry is None or now >= entry.stale_until:
+                return {
+                    "state": "miss",
+                    "eviction_policy": self._eviction_policy,
+                    "present": False,
+                }
+            state = "fresh" if now < entry.fresh_until else "stale"
+            persistent = math.isinf(entry.fresh_until)
+            lineage = None
+            if isinstance(entry.value, dict):
+                if entry.value.get("$megacache_origin_value_v1") is True:
+                    lineage = {
+                        "origin": entry.value.get("origin"),
+                        "path": _safe_lineage_path(entry.value.get("path")),
+                        "status": entry.value.get("status"),
+                    }
+                elif entry.value.get("$megacache_origin_negative_v1") is True:
+                    lineage = {
+                        "origin": entry.value.get("origin"),
+                        "path": _safe_lineage_path(entry.value.get("path")),
+                        "status": entry.value.get("status"),
+                        "negative": True,
+                    }
+            return {
+                "state": state,
+                "present": True,
+                "persistent": persistent,
+                "fresh_for_seconds": (
+                    None
+                    if persistent
+                    else max(0.0, entry.fresh_until - now)
+                ),
+                "stale_for_seconds": (
+                    None
+                    if persistent
+                    else max(
+                        0.0,
+                        entry.stale_until - max(now, entry.fresh_until),
+                    )
+                ),
+                "configured_ttl_seconds": (
+                    None
+                    if entry.configured_ttl_seconds is None
+                    else int(entry.configured_ttl_seconds)
+                ),
+                "size_bytes": entry.size_bytes,
+                "access_count": entry.access_count,
+                "load_cost_ms": round(entry.load_cost_ms, 3),
+                "eviction_policy": self._eviction_policy,
+                "eviction_score": round(
+                    self._eviction_score(entry, now), 6
+                ),
+                "lineage": lineage,
+            }
 
     def observe_request(
         self,
@@ -770,6 +877,7 @@ class CacheEngine:
                         "memory_bytes",
                         "lease_memory_bytes",
                         "memory_limit_bytes",
+                        "cost_aware_eviction_enabled",
                     )
                     else "counter"
                 )
@@ -842,7 +950,6 @@ class CacheEngine:
     @staticmethod
     def _prometheus_label(value: str) -> str:
         return value.replace("\\", "\\\\").replace("\n", "\\n").replace('"', '\\"')
-
     def _lookup(self, key: str, count: bool) -> CacheResult:
         now = self._clock()
         entry = self._entries.get(key)
@@ -858,6 +965,9 @@ class CacheEngine:
             return CacheResult(state="miss")
 
         self._entries.move_to_end(key)
+        if count:
+            entry.access_count = min(entry.access_count + 1, 2_147_483_647)
+            entry.last_access = now
         if now < entry.fresh_until:
             if count:
                 self._metrics["hits_total"] += 1
@@ -917,9 +1027,32 @@ class CacheEngine:
             len(self._entries) > self._max_entries
             or self._used_bytes > self._max_memory_bytes
         ):
-            key = next(iter(self._entries))
+            if self._eviction_policy == "lru":
+                key = next(iter(self._entries))
+            else:
+                now = self._clock()
+                key = min(
+                    self._entries,
+                    key=lambda item: (
+                        self._eviction_score(self._entries[item], now),
+                        item,
+                    ),
+                )
             self._remove_entry(key)
             self._metrics["evictions_total"] += 1
+            self._metrics[
+                "cost_evictions_total"
+                if self._eviction_policy == "cost"
+                else "lru_evictions_total"
+            ] += 1
+
+    @staticmethod
+    def _eviction_score(entry: _Entry, now: float) -> float:
+        age = max(0.0, now - entry.last_access)
+        reuse = 1.0 + math.log1p(entry.access_count)
+        cost = 1.0 + math.log1p(entry.load_cost_ms)
+        size = max(1.0, math.sqrt(entry.size_bytes))
+        return (reuse * cost) / (size * (1.0 + age))
 
     def _prepare_put(
         self,

@@ -390,6 +390,7 @@ class ClusterStorage:
         max_lease_memory_bytes: int = 67_108_864,
         max_retained_tombstones: int = 10_000,
         clock: Callable[[], float] = time.monotonic,
+        max_hot_replica_keys: int = 10_000,
     ) -> None:
         normalized = tuple(nodes)
         if not normalized:
@@ -409,6 +410,7 @@ class ClusterStorage:
             or max_leases <= 0
             or max_lease_memory_bytes <= 0
             or max_retained_tombstones <= 0
+            or max_hot_replica_keys <= 0
         ):
             raise ValueError("cluster capacity limits must be greater than zero")
         if snapshot_chunk_bytes > snapshot_payload_limit_bytes:
@@ -441,6 +443,7 @@ class ClusterStorage:
         self._max_leases = max_leases
         self._max_lease_memory_bytes = max_lease_memory_bytes
         self._max_retained_tombstones = max_retained_tombstones
+        self._max_hot_replica_keys = max_hot_replica_keys
         self._ring = ConsistentHashRing(
             ring_nodes, virtual_nodes=virtual_nodes, version=1
         )
@@ -459,6 +462,7 @@ class ClusterStorage:
         }
         self._known_keys: set = set()
         self._catalog_keys: set = set()
+        self._hot_replicas: Dict[str, set] = {}
         self._tombstone_gc_watermark: Optional[VersionStamp] = None
         self._key_tags: Dict[str, Tuple[str, ...]] = {}
         self._tag_keys: Dict[str, set] = defaultdict(set)
@@ -694,6 +698,21 @@ class ClusterStorage:
                         if node_id not in desired:
                             self._nodes[node_id].storage.delete(key)
                             self._metadata[node_id].pop(key, None)
+                for key, replicas in tuple(self._hot_replicas.items()):
+                    desired = set(
+                        self._ring.owners(key, self._replica_count)
+                    )
+                    retained = {
+                        node_id
+                        for node_id in replicas
+                        if node_id in self._nodes
+                        and self._nodes[node_id].status == "active"
+                        and node_id not in desired
+                    }
+                    if retained:
+                        self._hot_replicas[key] = retained
+                    else:
+                        self._hot_replicas.pop(key, None)
             except BaseException:
                 self._restore_backend_checkpoints_locked(checkpoints)
                 for node_id, metadata in old_metadata.items():
@@ -716,7 +735,170 @@ class ClusterStorage:
                 "ring_version": self._ring.version,
                 "primary": owners[0],
                 "replicas": list(owners),
+                "hot_replicas": sorted(self._hot_replicas.get(key, ())),
             }
+
+    def replicate_hot_key(self, key: str, extra_replicas: int = 1) -> int:
+        """Best-effort extra copies inside this in-process coordinator only."""
+        self._validate_key(key)
+        if (
+            isinstance(extra_replicas, bool)
+            or not isinstance(extra_replicas, int)
+            or extra_replicas < 0
+        ):
+            raise ValueError("extra_replicas must be a non-negative integer")
+        if extra_replicas == 0:
+            return 0
+        with self._lock:
+            result, source_id, metadata = self._read_locked(
+                key, self._consistency
+            )
+            if (
+                result.state == "miss"
+                or source_id is None
+                or metadata is None
+                or metadata.deleted
+            ):
+                return 0
+            exported = self._nodes[source_id].storage.export_entries((key,))
+            if not exported:
+                return 0
+            owners = set(self._ring.owners(key, self._replica_count))
+            candidates = [
+                node_id
+                for node_id in sorted(self._nodes)
+                if node_id not in owners
+                and self._nodes[node_id].status == "active"
+                and self._healthy(self._nodes[node_id])
+            ][:extra_replicas]
+            if (
+                key not in self._hot_replicas
+                and len(self._hot_replicas) >= self._max_hot_replica_keys
+            ):
+                self._metrics["hot_replication_limit_total"] += 1
+                return 0
+            added = 0
+            for node_id in candidates:
+                try:
+                    self._nodes[node_id].storage.restore_entries(exported)
+                    self._metadata[node_id][key] = metadata
+                    self._hot_replicas.setdefault(key, set()).add(node_id)
+                    added += 1
+                except (ValueError, TypeError):
+                    self._metrics["hot_replication_errors_total"] += 1
+            if added:
+                self._metrics["hot_replications_total"] += added
+            return added
+
+    def release_hot_key(self, key: str) -> int:
+        """Remove best-effort copies that are not configured owners."""
+        self._validate_key(key)
+        with self._lock:
+            owners = set(self._ring.owners(key, self._replica_count))
+            removed = 0
+            for node_id in tuple(self._hot_replicas.pop(key, ())):
+                if node_id in owners:
+                    continue
+                try:
+                    removed += int(self._nodes[node_id].storage.delete(key))
+                    self._metadata[node_id].pop(key, None)
+                except Exception:
+                    self._metrics["hot_replication_errors_total"] += 1
+            return removed
+
+    def record_load_cost(self, key: str, duration_ms: float) -> None:
+        self._validate_key(key)
+        with self._lock:
+            owners = self._ring.owners(key, self._replica_count)
+            targets = set(owners) | set(self._hot_replicas.get(key, ()))
+            for node_id in sorted(targets):
+                recorder = getattr(
+                    self._nodes[node_id].storage, "record_load_cost", None
+                )
+                if recorder is not None:
+                    recorder(key, duration_ms)
+
+    def explain_entry(self, key: str) -> Dict[str, Any]:
+        self._validate_key(key)
+        with self._lock:
+            self._detect_failures_locked()
+            owners = self._ring.owners(key, self._replica_count)
+            available = self._available_owners_locked(owners)
+            required = self._consistency.required(len(owners))
+            if len(available) < required:
+                raise QuorumError(
+                    self._quorum_message("read", required, len(available))
+                )
+            latest = self._latest_metadata_locked(key)
+            value = {"state": "miss", "present": False}
+            if latest is None or not latest.deleted:
+                hot = tuple(
+                    node_id
+                    for node_id in sorted(self._hot_replicas.get(key, ()))
+                    if self._healthy(self._nodes[node_id])
+                    and latest is not None
+                    and self._metadata[node_id].get(key) is not None
+                    and self._metadata[node_id][key].version == latest.version
+                    and not self._metadata[node_id][key].deleted
+                )
+                for source_id in hot + tuple(available):
+                    metadata = self._metadata[source_id].get(key)
+                    if latest is not None and (
+                        metadata is None
+                        or metadata.version != latest.version
+                        or metadata.deleted
+                    ):
+                        continue
+                    descriptor = getattr(
+                        self._nodes[source_id].storage,
+                        "explain_entry",
+                        None,
+                    )
+                    if descriptor is not None:
+                        candidate = dict(descriptor(key))
+                    else:
+                        exported = self._nodes[
+                            source_id
+                        ].storage.export_entries((key,))
+                        if not exported:
+                            candidate = {
+                                "state": "miss",
+                                "present": False,
+                            }
+                        else:
+                            entry = exported[0]
+                            candidate = {
+                                "state": (
+                                    "fresh"
+                                    if entry.persistent
+                                    or (
+                                        entry.fresh_for_seconds is not None
+                                        and entry.fresh_for_seconds > 0
+                                    )
+                                    else "stale"
+                                ),
+                                "present": True,
+                                "persistent": entry.persistent,
+                                "fresh_for_seconds": (
+                                    None
+                                    if entry.persistent
+                                    else entry.fresh_for_seconds
+                                ),
+                                "stale_for_seconds": (
+                                    None
+                                    if entry.persistent
+                                    else entry.stale_for_seconds
+                                ),
+                            }
+                    if (
+                        candidate.get("present") is True
+                        and candidate.get("state") != "miss"
+                    ):
+                        value = candidate
+                        break
+            value["ownership"] = self.ownership(key)
+            value["distribution_scope"] = "in-process"
+            return value
 
     def get(
         self,
@@ -945,6 +1127,7 @@ class ClusterStorage:
             self._tombstone_gc_watermark = self._next_version_locked()
             self._known_keys.clear()
             self._catalog_keys.clear()
+            self._hot_replicas.clear()
             self._key_tags.clear()
             self._tag_keys.clear()
             self._leases.clear()
@@ -1336,6 +1519,7 @@ class ClusterStorage:
         with self._lock:
             self._detect_failures_locked()
             ownership = defaultdict(lambda: {"primary": 0, "replicas": 0})
+            hot_ownership = defaultdict(int)
             lag = defaultdict(int)
             for key in self._catalog_keys:
                 owners = self._ring.owners(key, self._replica_count)
@@ -1350,6 +1534,9 @@ class ClusterStorage:
                         metadata is None or metadata.version < latest.version
                     ):
                         lag[node_id] += 1
+            for replicas in self._hot_replicas.values():
+                for node_id in replicas:
+                    hot_ownership[node_id] += 1
             nodes = []
             now = self._clock()
             for node_id in sorted(self._nodes):
@@ -1364,6 +1551,7 @@ class ClusterStorage:
                         ),
                         "primary_keys": ownership[node_id]["primary"],
                         "replica_keys": ownership[node_id]["replicas"],
+                        "hot_replica_keys": hot_ownership[node_id],
                         "replication_lag_entries": lag[node_id],
                     }
                 )
@@ -1438,6 +1626,10 @@ class ClusterStorage:
                     "cluster_degraded": int(self._degraded_locked()),
                     "retained_tombstones": self._tombstone_count_locked(),
                     "retained_tombstone_limit": self._max_retained_tombstones,
+                    "hot_replica_keys": len(self._hot_replicas),
+                    "hot_replica_copies": sum(
+                        len(nodes) for nodes in self._hot_replicas.values()
+                    ),
                     "active_leases": sum(
                         1
                         for lease in self._leases.values()
@@ -1491,6 +1683,9 @@ class ClusterStorage:
                         "cluster_leadership_term",
                         "cluster_degraded",
                         "active_leases",
+                        "hot_replica_keys",
+                        "hot_replica_copies",
+                        "cost_aware_eviction_enabled",
                     }
                     else "counter"
                 )
@@ -1817,6 +2012,13 @@ class ClusterStorage:
                 self._replace_key_tags_locked(key, ())
                 self._known_keys.discard(key)
                 self._catalog_keys.add(key)
+                for node_id in tuple(self._hot_replicas.get(key, ())):
+                    try:
+                        self._nodes[node_id].storage.delete(key)
+                        self._metadata[node_id].pop(key, None)
+                    except Exception:
+                        self._metrics["hot_replication_errors_total"] += 1
+                self._hot_replicas.pop(key, None)
                 self._remove_lease_locked(key)
             self._gc_tombstones_locked(selected)
             if (
@@ -1862,20 +2064,42 @@ class ClusterStorage:
             raise QuorumError(
                 self._quorum_message("read", required, len(available))
             )
-        responses = []
+        latest = self._latest_metadata_locked(key)
+        hot_responses = []
+        for node_id in sorted(self._hot_replicas.get(key, ())):
+            metadata = self._metadata[node_id].get(key)
+            if (
+                not self._healthy(self._nodes[node_id])
+                or latest is None
+                or metadata != latest
+                or metadata.deleted
+            ):
+                self._prune_hot_replica_locked(key, node_id)
+                continue
+            try:
+                result = self._nodes[node_id].storage.get(key)
+            except (ValueError, TypeError):
+                continue
+            if result.state == "miss":
+                self._prune_hot_replica_locked(key, node_id)
+                continue
+            hot_responses.append((node_id, result, metadata))
+
+        owner_responses = []
         for node_id in available:
             try:
                 result = self._nodes[node_id].storage.get(key)
                 metadata = self._metadata[node_id].get(key)
-                responses.append((node_id, result, metadata))
+                owner_responses.append((node_id, result, metadata))
                 if profile is ConsistencyProfile.ONE:
                     break
             except (ValueError, TypeError):
                 continue
-        if len(responses) < required:
+        if len(owner_responses) < required:
             raise QuorumError(
-                self._quorum_message("read", required, len(responses))
+                self._quorum_message("read", required, len(owner_responses))
             )
+        responses = hot_responses + owner_responses
         winner = max(
             responses,
             key=lambda item: (
@@ -1906,6 +2130,18 @@ class ClusterStorage:
             self._known_keys.discard(key)
             self._replace_key_tags_locked(key, ())
         return result, node_id, metadata
+
+    def _prune_hot_replica_locked(self, key: str, node_id: str) -> None:
+        replicas = self._hot_replicas.get(key)
+        if replicas is not None:
+            replicas.discard(node_id)
+            if not replicas:
+                self._hot_replicas.pop(key, None)
+        self._metadata[node_id].pop(key, None)
+        try:
+            self._nodes[node_id].storage.delete(key)
+        except Exception:
+            self._metrics["hot_replication_errors_total"] += 1
 
     def _read_repair_locked(
         self,

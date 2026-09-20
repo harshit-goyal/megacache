@@ -105,6 +105,71 @@ class MegaCacheHandler(BaseHTTPRequestHandler):
             else:
                 self._json(200, status())
             return
+        if path == "/v1/policies/recommendations":
+            if not self._authorized("admin"):
+                return
+            recommendations = getattr(
+                self.server.engine, "recommendations", None
+            )
+            if recommendations is None:
+                self._json(
+                    503,
+                    {
+                        "error": "intelligence_not_configured",
+                        "message": "cache intelligence is not available",
+                    },
+                )
+            else:
+                principal = self._principal
+                assert principal is not None
+                self._json(
+                    200,
+                    recommendations(
+                        key_filter=lambda key: principal.allows(
+                            "admin", (key,)
+                        )
+                    ),
+                )
+            return
+        if path == "/v1/experiments":
+            if not self._authorized("admin"):
+                return
+            status = getattr(self.server.engine, "experiment_status", None)
+            if status is None:
+                self._json(
+                    503,
+                    {
+                        "error": "intelligence_not_configured",
+                        "message": "cache intelligence is not available",
+                    },
+                )
+            else:
+                self._json(200, status())
+            return
+        key = self._key_from(path, "/v1/explain/")
+        if key is not None:
+            if not self._authorized("read", (key,)):
+                return
+            explain = getattr(self.server.engine, "explain", None)
+            if explain is None:
+                self._json(
+                    503,
+                    {
+                        "error": "intelligence_not_configured",
+                        "message": "cache intelligence is not available",
+                    },
+                )
+                return
+            try:
+                self._json(200, explain(key))
+            except QuorumError as exc:
+                self._json(
+                    503,
+                    {"error": "quorum_unavailable", "message": str(exc)},
+                )
+            except ValueError as exc:
+                self._json(400, {"error": "invalid_request", "message": str(exc)})
+            return
         key = self._key_from(path, "/v1/cache/")
         if key is not None:
             if not self._authorized("read", (key,)):
@@ -233,6 +298,26 @@ class MegaCacheHandler(BaseHTTPRequestHandler):
                     },
                 )
             except (EventError, ValueError) as exc:
+                self._json(
+                    400, {"error": "invalid_request", "message": str(exc)}
+                )
+            return
+        if path == "/v1/policies/simulate":
+            if not self._authorized("admin"):
+                return
+            simulate = getattr(self.server.engine, "simulate", None)
+            if simulate is None:
+                self._json(
+                    503,
+                    {
+                        "error": "intelligence_not_configured",
+                        "message": "cache intelligence is not available",
+                    },
+                )
+                return
+            try:
+                self._json(200, simulate(self._read_json()))
+            except (ValueError, TypeError) as exc:
                 self._json(
                     400, {"error": "invalid_request", "message": str(exc)}
                 )
@@ -548,12 +633,16 @@ class MegaCacheHandler(BaseHTTPRequestHandler):
             "/v1/events",
             "/v1/events/status",
             "/v1/events/retry",
+            "/v1/policies/recommendations",
+            "/v1/policies/simulate",
+            "/v1/experiments",
         ):
             return "{} {}".format(self.command, path)
         for prefix, route in (
             ("/v1/cache/", "/v1/cache/{key}"),
             ("/v1/lease/", "/v1/lease/{key}"),
             ("/v1/fetch/", "/v1/fetch/{key}"),
+            ("/v1/explain/", "/v1/explain/{key}"),
         ):
             if path.startswith(prefix):
                 return "{} {}".format(self.command, route)

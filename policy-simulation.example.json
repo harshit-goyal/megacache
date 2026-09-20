@@ -1,0 +1,30 @@
+{
+  "policy": {
+    "min_ttl_seconds": 5,
+    "max_ttl_seconds": 600,
+    "eviction_policy": "cost",
+    "capacity_entries": 1
+  },
+  "records": [
+    {
+      "key": "catalog:product:123",
+      "base_ttl_seconds": 300,
+      "accesses": 1200,
+      "loads": 20,
+      "changes": 2,
+      "size_bytes": 4096,
+      "load_latency_ms": 180,
+      "last_access_age_seconds": 2
+    },
+    {
+      "key": "catalog:price:123",
+      "base_ttl_seconds": 60,
+      "accesses": 800,
+      "loads": 20,
+      "changes": 12,
+      "size_bytes": 1024,
+      "load_latency_ms": 15,
+      "last_access_age_seconds": 30
+    }
+  ]
+}

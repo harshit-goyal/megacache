@@ -3,6 +3,7 @@ include README.md
 include SECURITY.md
 include origins.example.json
 include events.example.json
+include policy-simulation.example.json
 recursive-include docs *.md
 recursive-include tests *.py
 recursive-include sdk *.py *.js *.json *.ts *.go *.java *.xml *.md

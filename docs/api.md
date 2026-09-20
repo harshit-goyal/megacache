@@ -123,6 +123,58 @@ no matched key is removed when any key cannot satisfy quorum.
 
 Returns `{"invalidated": 12}`.
 
+## Cache intelligence
+
+### `GET /v1/explain/{key}`
+
+Requires `read` permission for the key, including named-user key-prefix
+restrictions. Returns current freshness windows, estimated size, eviction
+policy and score, origin lineage, bounded access/load evidence, reasons, and
+the recommended policy. Cached values are never included.
+
+### `GET /v1/policies/recommendations`
+
+Administrator-only bounded recommendations generated from deterministic
+counters and thresholds. For administrators with configured key prefixes,
+both recommendation rows and `tracked_keys` are limited to authorized keys.
+The response identifies that no statistical or ML model is used.
+
+### `POST /v1/policies/simulate`
+
+Administrator-only offline dry run. It accepts:
+
+```json
+{
+  "policy": {
+    "min_ttl_seconds": 5,
+    "max_ttl_seconds": 600,
+    "eviction_policy": "cost",
+    "capacity_entries": 1000
+  },
+  "records": [
+    {
+      "key": "catalog:product:123",
+      "base_ttl_seconds": 300,
+      "accesses": 1200,
+      "loads": 20,
+      "changes": 2,
+      "size_bytes": 4096,
+      "load_latency_ms": 180,
+      "last_access_age_seconds": 2
+    }
+  ]
+}
+```
+
+The bounded response compares base and simulated TTL, estimates relative
+origin-load change, and counts configured freshness-bound violations. It never
+changes live configuration or evaluates caller-supplied expressions.
+
+### `GET /v1/experiments`
+
+Administrator-only experiment allocation, sample counts, miss-rate guardrail,
+status, rollback reason, and bounded decision audit.
+
 ## Freshness events
 
 ### `POST /v1/events`
@@ -195,6 +247,10 @@ state semantics, adapters, and configuration.
 - `GET /v1/stats`: JSON metric snapshot.
 - `GET /v1/origins`: administrator-only origin health and breaker state.
 - `GET /v1/events/status`: administrator-only freshness ingestion status.
+- `GET /v1/explain/{key}`: authorized per-key policy explanation.
+- `GET /v1/policies/recommendations`: administrator-only recommendations.
+- `POST /v1/policies/simulate`: administrator-only dry-run simulation.
+- `GET /v1/experiments`: administrator-only guardrail and rollback status.
 
 Errors are JSON objects with a stable `error` identifier and, for invalid
 requests, a human-readable `message`.

@@ -44,6 +44,8 @@ class ObservabilityTests(unittest.TestCase):
         )
         record.event_source = "catalog"
         record.event_outcome = "processed"
+        record.experiment_id = "ttl-v1"
+        record.reason = "guardrail"
         document = json.loads(JsonFormatter().format(record))
         self.assertEqual("request", document["message"])
         self.assertEqual("http", document["protocol"])
@@ -51,6 +53,8 @@ class ObservabilityTests(unittest.TestCase):
         self.assertEqual(record.traceparent, document["traceparent"])
         self.assertEqual("catalog", document["event_source"])
         self.assertEqual("processed", document["event_outcome"])
+        self.assertEqual("ttl-v1", document["experiment_id"])
+        self.assertEqual("guardrail", document["reason"])
 
 
 if __name__ == "__main__":

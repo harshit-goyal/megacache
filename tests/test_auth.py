@@ -10,6 +10,7 @@ from megacache.auth import AuthManager, hash_password, verify_password
 from megacache.client import MegaCacheClient, MegaCacheCommandError
 from megacache.config import Config
 from megacache.engine import CacheEngine
+from megacache.intelligence import CacheIntelligence
 from megacache.resp import MegaCacheRespServer
 from megacache.server import MegaCacheServer
 
@@ -35,6 +36,12 @@ class AuthenticationTests(unittest.TestCase):
                             "password_hash": password_hash,
                             "permissions": ["admin"],
                             "key_prefixes": [],
+                        },
+                        {
+                            "username": "tenant-admin",
+                            "password_hash": password_hash,
+                            "permissions": ["admin"],
+                            "key_prefixes": ["tenant:1:"],
                         },
                         {
                             "username": "writer",
@@ -76,7 +83,9 @@ class AuthenticationTests(unittest.TestCase):
 
     def test_resp_named_user_permissions(self):
         config = self._config()
-        engine = CacheEngine(max_entries=100)
+        engine = CacheIntelligence(
+            CacheEngine(max_entries=100), enabled=True
+        )
         engine.put("tenant:1:key", b"value")
         server = MegaCacheRespServer(("127.0.0.1", 0), config, engine)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -88,10 +97,16 @@ class AuthenticationTests(unittest.TestCase):
                 password="correct horse",
             ) as client:
                 self.assertEqual(b"value", client.command("GET", "tenant:1:key"))
+                explanation = json.loads(
+                    client.command("MC.EXPLAIN", "tenant:1:key")
+                )
+                self.assertEqual("fresh", explanation["current"]["state"])
                 with self.assertRaisesRegex(MegaCacheCommandError, "NOPERM"):
                     client.command("SET", "tenant:1:key", "changed")
                 with self.assertRaisesRegex(MegaCacheCommandError, "NOPERM"):
                     client.command("GET", "tenant:2:key")
+                with self.assertRaisesRegex(MegaCacheCommandError, "NOPERM"):
+                    client.command("MC.EXPLAIN", "tenant:2:key")
             with MegaCacheClient(
                 port=server.server_address[1],
                 username="writer",
@@ -139,6 +154,86 @@ class AuthenticationTests(unittest.TestCase):
             response.read()
             self.assertEqual(403, response.status)
             connection.close()
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=1)
+
+    def test_restricted_admin_resp_recommendations_are_prefix_filtered(self):
+        engine = CacheIntelligence(CacheEngine(max_entries=100), enabled=True)
+        for key in ("tenant:1:key", "tenant:2:key"):
+            engine.record_origin_load(key, "catalog", 0.1, b"old")
+            engine.record_origin_load(key, "catalog", 0.1, b"new")
+        server = MegaCacheRespServer(
+            ("127.0.0.1", 0), self._config(), engine
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with MegaCacheClient(
+                port=server.server_address[1],
+                username="tenant-admin",
+                password="correct horse",
+            ) as client:
+                document = json.loads(
+                    client.command("MC.RECOMMENDATIONS", 10)
+                )
+                self.assertEqual(
+                    ["tenant:1:key"],
+                    [item["key"] for item in document["recommendations"]],
+                )
+                self.assertEqual(1, document["tracked_keys"])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=1)
+
+    def test_restricted_admin_http_recommendations_and_explain_use_prefixes(self):
+        engine = CacheIntelligence(CacheEngine(max_entries=100), enabled=True)
+        for key in ("tenant:1:key", "tenant:2:key"):
+            engine.put(key, "value")
+            engine.record_origin_load(key, "catalog", 0.1, b"old")
+            engine.record_origin_load(key, "catalog", 0.1, b"new")
+        server = MegaCacheServer(
+            ("127.0.0.1", 0), self._config(), engine
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        credential = base64.b64encode(
+            b"tenant-admin:correct horse"
+        ).decode("ascii")
+        headers = {"Authorization": "Basic " + credential}
+        try:
+            connection = HTTPConnection(
+                "127.0.0.1", server.server_address[1], timeout=2
+            )
+            connection.request(
+                "GET", "/v1/policies/recommendations", headers=headers
+            )
+            response = connection.getresponse()
+            document = json.loads(response.read())
+            connection.close()
+            self.assertEqual(200, response.status)
+            self.assertEqual(
+                ["tenant:1:key"],
+                [item["key"] for item in document["recommendations"]],
+            )
+            self.assertEqual(1, document["tracked_keys"])
+
+            for key, expected in (
+                ("tenant%3A1%3Akey", 200),
+                ("tenant%3A2%3Akey", 403),
+            ):
+                connection = HTTPConnection(
+                    "127.0.0.1", server.server_address[1], timeout=2
+                )
+                connection.request(
+                    "GET", "/v1/explain/" + key, headers=headers
+                )
+                response = connection.getresponse()
+                response.read()
+                connection.close()
+                self.assertEqual(expected, response.status)
         finally:
             server.shutdown()
             server.server_close()

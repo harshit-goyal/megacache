@@ -6,6 +6,7 @@ from http.client import HTTPConnection
 from megacache.cluster import QuorumError
 from megacache.config import Config
 from megacache.engine import CacheEngine
+from megacache.intelligence import CacheIntelligence
 from megacache.origin import HTTPOrigin, OriginCache, OriginResponse
 from megacache.server import MegaCacheServer
 
@@ -32,24 +33,27 @@ class ServerTests(unittest.TestCase):
             users_file=None,
             log_format="text",
         )
-        cls.engine = OriginCache(
-            CacheEngine(max_entries=100),
-            [
-                HTTPOrigin.from_dict(
-                    {
-                        "name": "catalog",
-                        "base_url": "https://origin.example",
-                        "allowed_hosts": ["origin.example"],
-                        "allowed_ports": [443],
-                        "allowed_path_prefixes": ["/v1/"],
-                        "retry_attempts": 0,
-                    }
-                )
-            ],
-            resolver=lambda host, port: ["93.184.216.34"],
-            transport=lambda origin, path, addresses: OriginResponse(
-                200, path.encode("utf-8")
+        cls.engine = CacheIntelligence(
+            OriginCache(
+                CacheEngine(max_entries=100),
+                [
+                    HTTPOrigin.from_dict(
+                        {
+                            "name": "catalog",
+                            "base_url": "https://origin.example",
+                            "allowed_hosts": ["origin.example"],
+                            "allowed_ports": [443],
+                            "allowed_path_prefixes": ["/v1/"],
+                            "retry_attempts": 0,
+                        }
+                    )
+                ],
+                resolver=lambda host, port: ["93.184.216.34"],
+                transport=lambda origin, path, addresses: OriginResponse(
+                    200, path.encode("utf-8")
+                ),
             ),
+            enabled=True,
         )
         cls.server = MegaCacheServer(
             ("127.0.0.1", 0), config, cls.engine
@@ -167,6 +171,35 @@ class ServerTests(unittest.TestCase):
         status, payload = self.request("GET", "/v1/origins")
         self.assertEqual(200, status)
         self.assertEqual("closed", payload["catalog"]["breaker_state"])
+
+        status, payload = self.request(
+            "GET", "/v1/explain/http%3Aproduct%3A1"
+        )
+        self.assertEqual(200, status)
+        self.assertEqual("fresh", payload["current"]["state"])
+        self.assertEqual("catalog", payload["current"]["lineage"]["origin"])
+
+    def test_policy_simulation_and_experiment_status(self):
+        status, payload = self.request(
+            "POST",
+            "/v1/policies/simulate",
+            {
+                "records": [
+                    {
+                        "key": "product:1",
+                        "base_ttl_seconds": 60,
+                        "accesses": 20,
+                        "loads": 2,
+                        "changes": 1,
+                    }
+                ]
+            },
+        )
+        self.assertEqual(200, status)
+        self.assertTrue(payload["dry_run"])
+        status, payload = self.request("GET", "/v1/experiments")
+        self.assertEqual(200, status)
+        self.assertEqual("disabled", payload["status"])
 
     def test_http_fetch_reports_quorum_failure_as_service_unavailable(self):
         original = self.engine.fetch

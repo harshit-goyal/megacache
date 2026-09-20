@@ -17,7 +17,7 @@ behind appropriate network controls; use a TCP TLS proxy for RESP when traffic
 crosses a trusted boundary. The process runs as an unprivileged user in the
 supplied container, logs requests to standard output, and shuts down cleanly.
 
-Version 0.8's cluster is in-process. A comma-separated
+Version 0.9's cluster is in-process. A comma-separated
 `MEGACACHE_CLUSTER_NODES` value creates independent logical storage nodes
 managed by one coordinator. This is useful for embedded operation, exercising
 replication behavior, and validating failure procedures, but it is not a
@@ -133,6 +133,37 @@ buffer. Measure representative payloads and leave process-memory headroom.
 Keep `MEGACACHE_MAX_BODY_BYTES` close to the largest legitimate request; the
 same limit applies to the total RESP command payload.
 
+## Cache intelligence rollout
+
+Keep `MEGACACHE_INTELLIGENCE_ENABLED=false` and
+`MEGACACHE_EVICTION_POLICY=lru` during the first baseline capture. Run:
+
+```bash
+mc policy-simulate policy-simulation.example.json
+```
+
+Then enable bounded telemetry, inspect `mc explain`, and review
+`mc recommendations`. Adaptive TTL only shortens positive origin TTLs and
+never exceeds an origin's declared freshness bound. Cost-aware eviction is
+separate and opt-in.
+
+For a controlled adaptive-TTL experiment, set a stable experiment ID, explicit
+candidate allocation, minimum samples per arm, and maximum accepted miss-rate
+regression. A regression automatically switches the experiment to
+`rolled_back`. Place `MEGACACHE_INTELLIGENCE_STATE_FILE` on protected local
+storage; it contains only bounded aggregate decisions, but it is not a
+multi-process coordination store. If a rollback cannot be persisted, the
+candidate remains disabled in the current process and `persistence_error` plus
+`intelligence_state_write_errors_total` report the failure. Because the
+decision is then not durable, a restart can re-enable the configured
+experiment.
+
+Hot-key extra copies and refresh priority remain bounded. Extra copies are
+strictly in-process, are version checked before reads, and never satisfy
+quorum. Monitor tracked telemetry capacity, telemetry evictions, hot-copy
+updates, and experiment rollbacks. See
+[Cache intelligence](intelligence.md) for formulas and limits.
+
 ## TLS
 
 Set both variables; setting only one prevents startup:
@@ -166,6 +197,10 @@ Scrape `/metrics` and alert on:
   and refresh errors from `mc info` or `/v1/stats`.
 - `megacache_events_total` by outcome, `event_dead_letter_depth`,
   `event_graph_rejected_total`, checkpoint age, and source cursor lag.
+- `megacache_intelligence_tracked_keys`,
+  `megacache_intelligence_telemetry_evictions_total`,
+  `megacache_intelligence_hot_replications_total`, and
+  `megacache_intelligence_experiment_rollbacks_total`.
 
 Counters reset at process restart. `entries`, `tags`, and `active_leases` are
 gauges; other exported values are cumulative counters.
@@ -212,13 +247,13 @@ Snapshot sessions enforce
 `MEGACACHE_SNAPSHOT_CHUNK_BYTES`, and
 `MEGACACHE_SNAPSHOT_MAX_IN_FLIGHT`.
 
-There is no native node RPC in 0.8. Real packet loss, asymmetric partitions,
+There is no native node RPC in 0.9. Real packet loss, asymmetric partitions,
 cross-host clocks, and process split brain are outside implemented behavior.
 
 Treat MegaCache as optional infrastructure. Clients should enforce short
 timeouts and fall back to the authoritative origin when it is unavailable.
 Rate-limit that fallback to avoid transferring a cache outage to the origin.
 
-Because version 0.8 cache entries are in-memory, rolling restarts begin cold. Warm critical
+Because version 0.9 cache entries are in-memory, rolling restarts begin cold. Warm critical
 keys gradually with `mc fetch`; the same admission and origin protection
 policies apply to warming.

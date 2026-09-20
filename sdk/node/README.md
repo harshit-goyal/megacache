@@ -1,4 +1,4 @@
-# MegaCache Node.js SDK 0.8
+# MegaCache Node.js SDK 0.9
 
 Dependency-free Node.js 18+ RESP2 client with typed errors, bounded byte/entry
 L1 caching, per-key promise coalescing, stale-if-error, and L2 lease

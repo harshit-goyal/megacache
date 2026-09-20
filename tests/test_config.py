@@ -112,6 +112,53 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(70, config.event_max_error_bytes)
         self.assertEqual(8, config.event_graph_max_fanout)
 
+    def test_intelligence_environment_is_parsed_and_bounded(self):
+        with patch.dict(
+            os.environ,
+            {
+                "MEGACACHE_NODE_ID": "node-a",
+                "MEGACACHE_INTELLIGENCE_ENABLED": "true",
+                "MEGACACHE_ADAPTIVE_TTL_ENABLED": "true",
+                "MEGACACHE_EVICTION_POLICY": "cost",
+                "MEGACACHE_INTELLIGENCE_MAX_KEYS": "20",
+                "MEGACACHE_HOT_KEY_EXTRA_REPLICAS": "2",
+                "MEGACACHE_EXPERIMENT_ENABLED": "true",
+                "MEGACACHE_EXPERIMENT_ALLOCATION_PERCENT": "25",
+            },
+            clear=True,
+        ):
+            config = Config.from_env()
+        self.assertTrue(config.intelligence_enabled)
+        self.assertTrue(config.adaptive_ttl_enabled)
+        self.assertEqual("cost", config.eviction_policy)
+        self.assertEqual(20, config.intelligence_max_keys)
+        self.assertEqual(2, config.hot_key_extra_replicas)
+        self.assertEqual(25, config.experiment_allocation_percent)
+
+    def test_automated_intelligence_requires_explicit_safe_enablement(self):
+        with patch.dict(
+            os.environ,
+            {
+                "MEGACACHE_NODE_ID": "node-a",
+                "MEGACACHE_ADAPTIVE_TTL_ENABLED": "true",
+            },
+            clear=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "requires intelligence"):
+                Config.from_env()
+        with patch.dict(
+            os.environ,
+            {
+                "MEGACACHE_NODE_ID": "node-a",
+                "MEGACACHE_INTELLIGENCE_ENABLED": "true",
+                "MEGACACHE_EXPERIMENT_ENABLED": "true",
+                "MEGACACHE_EXPERIMENT_ALLOCATION_PERCENT": "100",
+            },
+            clear=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "between 1 and 99"):
+                Config.from_env()
+
 
 if __name__ == "__main__":
     unittest.main()

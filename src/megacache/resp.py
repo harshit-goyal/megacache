@@ -161,6 +161,10 @@ class MegaCacheRespHandler(socketserver.StreamRequestHandler):
             "MC.EVENT.RETRY",
             "MC.INVALIDATIONS",
             "MC.TRACEPARENT",
+            "MC.EXPLAIN",
+            "MC.RECOMMENDATIONS",
+            "MC.POLICY.SIMULATE",
+            "MC.EXPERIMENTS",
         }
         return command if command in supported else "UNKNOWN"
 
@@ -249,6 +253,10 @@ class MegaCacheRespHandler(socketserver.StreamRequestHandler):
             "MC.EVENT.RETRY": self._mc_event_retry,
             "MC.INVALIDATIONS": self._mc_invalidations,
             "MC.TRACEPARENT": self._mc_traceparent,
+            "MC.EXPLAIN": self._mc_explain,
+            "MC.RECOMMENDATIONS": self._mc_recommendations,
+            "MC.POLICY.SIMULATE": self._mc_policy_simulate,
+            "MC.EXPERIMENTS": self._mc_experiments,
         }
         if command == "QUIT":
             self._require_arity(args, 1)
@@ -405,7 +413,7 @@ class MegaCacheRespHandler(socketserver.StreamRequestHandler):
         lines = [
             "# Server",
             "redis_version:7.2.0",
-            "megacache_version:0.8.0",
+            "megacache_version:0.9.0",
             "redis_mode:standalone",
             "# Keyspace",
             "db0:keys={}".format(self.server.engine.size()),
@@ -443,7 +451,7 @@ class MegaCacheRespHandler(socketserver.StreamRequestHandler):
             b"server",
             b"megacache",
             b"version",
-            b"0.8.0",
+            b"0.9.0",
             b"proto",
             2,
             b"mode",
@@ -715,6 +723,67 @@ class MegaCacheRespHandler(socketserver.StreamRequestHandler):
         origins = getattr(self.server.engine, "origins", None)
         value = {} if origins is None else origins()
         return json.dumps(value, separators=(",", ":")).encode("utf-8")
+
+    def _mc_explain(self, args: Sequence[bytes]) -> bytes:
+        self._require_arity(args, 2)
+        key = self._key(args[1])
+        self._authorize("read", (key,))
+        explain = getattr(self.server.engine, "explain", None)
+        if explain is None:
+            raise RespCommandError("cache intelligence is not available")
+        return json.dumps(
+            explain(key), separators=(",", ":")
+        ).encode("utf-8")
+
+    def _mc_recommendations(self, args: Sequence[bytes]) -> bytes:
+        if len(args) not in (1, 2):
+            raise RespCommandError(
+                "wrong number of arguments for 'mc.recommendations' command"
+            )
+        self._authorize("admin")
+        limit = (
+            100
+            if len(args) == 1
+            else self._positive_arg(args[1], "recommendation limit")
+        )
+        recommend = getattr(self.server.engine, "recommendations", None)
+        if recommend is None:
+            raise RespCommandError("cache intelligence is not available")
+        principal = self.principal
+        assert principal is not None
+        return json.dumps(
+            recommend(
+                limit,
+                key_filter=lambda key: principal.allows("admin", (key,)),
+            ),
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+    def _mc_policy_simulate(self, args: Sequence[bytes]) -> bytes:
+        self._require_arity(args, 2)
+        self._authorize("admin")
+        try:
+            document = json.loads(args[1].decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RespCommandError("simulation input must be valid JSON") from exc
+        if not isinstance(document, dict):
+            raise RespCommandError("simulation input must be a JSON object")
+        simulate = getattr(self.server.engine, "simulate", None)
+        if simulate is None:
+            raise RespCommandError("cache intelligence is not available")
+        return json.dumps(
+            simulate(document), separators=(",", ":")
+        ).encode("utf-8")
+
+    def _mc_experiments(self, args: Sequence[bytes]) -> bytes:
+        self._require_arity(args, 1)
+        self._authorize("admin")
+        status = getattr(self.server.engine, "experiment_status", None)
+        if status is None:
+            raise RespCommandError("cache intelligence is not available")
+        return json.dumps(
+            status(), separators=(",", ":")
+        ).encode("utf-8")
 
     def _mc_event(self, args: Sequence[bytes]) -> bytes:
         self._require_arity(args, 2)

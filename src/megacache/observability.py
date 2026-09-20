@@ -17,6 +17,10 @@ _EXTRA_FIELDS = (
     "event_source",
     "event_stream",
     "event_outcome",
+    "experiment_id",
+    "reason",
+    "replicas_added",
+    "distribution_scope",
 )
 _TRACEPARENT_RE = re.compile(
     r"^(?!ff)[0-9a-f]{2}-(?!0{32})[0-9a-f]{32}-(?!0{16})[0-9a-f]{16}-[0-9a-f]{2}$"

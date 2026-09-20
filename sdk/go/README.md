@@ -1,4 +1,4 @@
-# MegaCache Go SDK 0.8
+# MegaCache Go SDK 0.9
 
 Package `megacache` supports Go 1.20+ using only the standard library. It
 provides RESP2 operations, typed errors, MegaCache fetch/lease/invalidate/status,

@@ -120,7 +120,7 @@ MC.SET product:123 '{"id":123}' TTL 300 STALE 900 LEASE token-from-mc-lease
 ```
 
 The optional `WINDOWS` argument appends remaining fresh/stale milliseconds to
-the `fresh`, `stale`, and `stale_lease` responses. Version 0.8 SDKs use it to
+the `fresh`, `stale`, and `stale_lease` responses. Version 0.9 SDKs use it to
 ensure an L1 entry never outlives its L2 freshness window. Omitting `WINDOWS`
 preserves the version 0.7 response shape.
 
@@ -199,6 +199,49 @@ not force an OpenTelemetry dependency.
 Returns compact JSON containing each configured origin's circuit-breaker state,
 active concurrency, bounded queue depth, retry tokens, and failure count.
 Administrator permission is required.
+
+### `MC.EXPLAIN`
+
+Returns compact JSON containing the current freshness and eviction state,
+origin lineage, bounded evidence, actionable reasons, and recommended policy:
+
+```text
+MC.EXPLAIN product:123
+```
+
+It requires `read` permission for the supplied key, including any configured
+key-prefix restriction. The response never contains the cached value.
+
+### `MC.RECOMMENDATIONS`
+
+Returns up to the requested number of deterministic policy recommendations:
+
+```text
+MC.RECOMMENDATIONS
+MC.RECOMMENDATIONS 50
+```
+
+The optional positive limit is capped at 1000. Administrator permission is
+required because results contain key names. Administrators with key-prefix
+restrictions receive only recommendations and tracked-key counts inside those
+prefixes.
+
+### `MC.POLICY.SIMULATE`
+
+Runs an offline policy dry run against a bounded JSON document:
+
+```text
+MC.POLICY.SIMULATE '{"policy":{"min_ttl_seconds":5,"max_ttl_seconds":600},"records":[]}'
+```
+
+It does not mutate cache contents or activate policy. Administrator permission
+is required.
+
+### `MC.EXPERIMENTS`
+
+Returns explicit allocation, sample guardrails, current experiment state,
+rollback reason, and the bounded audit list. Administrator permission is
+required.
 
 ### `MC.EVENT`
 

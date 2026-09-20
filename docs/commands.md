@@ -183,6 +183,9 @@ mc topology
 mc topology product:123
 mc status
 mc origins
+mc explain product:123
+mc recommendations --limit 50
+mc experiments
 mc events-status
 ```
 
@@ -192,6 +195,21 @@ state. Supplying a key reports its primary and replica owners. `mc status`
 returns a compact health summary. Both require administrator permission.
 `mc origins` reports per-origin breaker state, active concurrency, queue depth,
 retry tokens, and failure count; it also requires administrator permission.
+
+`mc explain key` requires read permission for that key and therefore respects
+named-user key prefixes. It returns no cached value. Recommendations and
+experiment status require administrator permission.
+
+Dry-run policy input from a file or stdin:
+
+```bash
+mc policy-simulate policy-simulation.example.json
+cat policy-simulation.example.json | mc policy-simulate
+```
+
+Simulation accepts only the documented JSON fields, never evaluates
+expressions, never changes live policy, and reports any configured freshness
+bound violations.
 
 Submit a normalized event from a file or standard input:
 
@@ -444,6 +462,6 @@ python3 -m pip wheel --no-deps --wheel-dir dist .
 Install the generated wheel:
 
 ```bash
-python3 -m pip install dist/megacache-0.8.0-py3-none-any.whl
+python3 -m pip install dist/megacache-0.9.0-py3-none-any.whl
 mc
 ```

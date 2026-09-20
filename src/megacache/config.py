@@ -46,6 +46,26 @@ def _positive_float(name: str, default: float) -> float:
     return value
 
 
+def _non_negative_float(name: str, default: float) -> float:
+    raw = os.getenv(name, str(default))
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError("{} must be a number".format(name)) from exc
+    if not math.isfinite(value) or value < 0:
+        raise ValueError("{} must be a finite non-negative number".format(name))
+    return value
+
+
+def _boolean(name: str, default: bool) -> bool:
+    raw = os.getenv(name, "true" if default else "false").lower()
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    raise ValueError("{} must be a boolean".format(name))
+
+
 def _choice(name: str, default: str, choices: Tuple[str, ...]) -> str:
     value = os.getenv(name, default).lower()
     if value not in choices:
@@ -122,6 +142,22 @@ class Config:
     event_graph_max_fanout: int = 100
     event_graph_max_depth: int = 16
     event_graph_max_invalidation_nodes: int = 10_000
+    intelligence_enabled: bool = False
+    adaptive_ttl_enabled: bool = False
+    intelligence_min_ttl_seconds: int = 5
+    intelligence_max_ttl_seconds: int = 3600
+    intelligence_max_keys: int = 10_000
+    intelligence_max_classes: int = 128
+    eviction_policy: str = "lru"
+    hot_key_threshold: int = 100
+    hot_key_window_seconds: int = 60
+    hot_key_extra_replicas: int = 1
+    experiment_enabled: bool = False
+    experiment_id: str = "adaptive-ttl-v1"
+    experiment_allocation_percent: int = 0
+    experiment_min_samples: int = 100
+    experiment_max_miss_regression: float = 0.05
+    intelligence_state_file: Optional[str] = "megacache-intelligence-state.json"
 
     def __post_init__(self) -> None:
         if (
@@ -182,8 +218,45 @@ class Config:
             or self.event_graph_max_fanout <= 0
             or self.event_graph_max_depth <= 0
             or self.event_graph_max_invalidation_nodes <= 0
+            or self.intelligence_min_ttl_seconds <= 0
+            or self.intelligence_max_ttl_seconds
+            < self.intelligence_min_ttl_seconds
+            or self.intelligence_max_keys <= 0
+            or self.intelligence_max_classes <= 0
+            or self.hot_key_threshold <= 0
+            or self.hot_key_window_seconds <= 0
+            or self.hot_key_extra_replicas < 0
+            or not 0 <= self.experiment_allocation_percent <= 100
+            or self.experiment_min_samples <= 0
+            or not math.isfinite(self.experiment_max_miss_regression)
+            or self.experiment_max_miss_regression < 0
         ):
             raise ValueError("configured capacity limits are invalid")
+        if self.eviction_policy not in ("lru", "cost"):
+            raise ValueError("eviction_policy must be lru or cost")
+        if (
+            not self.experiment_id
+            or len(self.experiment_id.encode("utf-8")) > 128
+        ):
+            raise ValueError("experiment_id must contain 1 to 128 UTF-8 bytes")
+        if self.adaptive_ttl_enabled and not self.intelligence_enabled:
+            raise ValueError(
+                "adaptive TTL requires intelligence to be enabled"
+            )
+        if self.experiment_enabled and not self.intelligence_enabled:
+            raise ValueError(
+                "experiments require intelligence to be enabled"
+            )
+        if self.experiment_enabled and not (
+            0 < self.experiment_allocation_percent < 100
+        ):
+            raise ValueError(
+                "enabled experiments require allocation between 1 and 99"
+            )
+        if self.experiment_enabled and self.intelligence_state_file is None:
+            raise ValueError(
+                "enabled experiments require an intelligence state file"
+            )
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -302,5 +375,57 @@ class Config:
             ),
             event_graph_max_invalidation_nodes=_positive_int(
                 "MEGACACHE_EVENT_GRAPH_MAX_INVALIDATION_NODES", 10_000
+            ),
+            intelligence_enabled=_boolean(
+                "MEGACACHE_INTELLIGENCE_ENABLED", False
+            ),
+            adaptive_ttl_enabled=_boolean(
+                "MEGACACHE_ADAPTIVE_TTL_ENABLED", False
+            ),
+            intelligence_min_ttl_seconds=_positive_int(
+                "MEGACACHE_INTELLIGENCE_MIN_TTL_SECONDS", 5
+            ),
+            intelligence_max_ttl_seconds=_positive_int(
+                "MEGACACHE_INTELLIGENCE_MAX_TTL_SECONDS", 3600
+            ),
+            intelligence_max_keys=_positive_int(
+                "MEGACACHE_INTELLIGENCE_MAX_KEYS", 10_000
+            ),
+            intelligence_max_classes=_positive_int(
+                "MEGACACHE_INTELLIGENCE_MAX_CLASSES", 128
+            ),
+            eviction_policy=_choice(
+                "MEGACACHE_EVICTION_POLICY", "lru", ("lru", "cost")
+            ),
+            hot_key_threshold=_positive_int(
+                "MEGACACHE_HOT_KEY_THRESHOLD", 100
+            ),
+            hot_key_window_seconds=_positive_int(
+                "MEGACACHE_HOT_KEY_WINDOW_SECONDS", 60
+            ),
+            hot_key_extra_replicas=_non_negative_int(
+                "MEGACACHE_HOT_KEY_EXTRA_REPLICAS", 1
+            ),
+            experiment_enabled=_boolean(
+                "MEGACACHE_EXPERIMENT_ENABLED", False
+            ),
+            experiment_id=os.getenv(
+                "MEGACACHE_EXPERIMENT_ID", "adaptive-ttl-v1"
+            ),
+            experiment_allocation_percent=_non_negative_int(
+                "MEGACACHE_EXPERIMENT_ALLOCATION_PERCENT", 0
+            ),
+            experiment_min_samples=_positive_int(
+                "MEGACACHE_EXPERIMENT_MIN_SAMPLES", 100
+            ),
+            experiment_max_miss_regression=_non_negative_float(
+                "MEGACACHE_EXPERIMENT_MAX_MISS_REGRESSION", 0.05
+            ),
+            intelligence_state_file=(
+                os.getenv(
+                    "MEGACACHE_INTELLIGENCE_STATE_FILE",
+                    "megacache-intelligence-state.json",
+                )
+                or None
             ),
         )

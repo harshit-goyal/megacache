@@ -1,4 +1,5 @@
 import json
+import queue
 import threading
 import time
 import unittest
@@ -19,6 +20,8 @@ from megacache import (
     load_origin_definitions,
     validate_origin_path,
 )
+from megacache.intelligence import CacheIntelligence
+from megacache.origin import _AgingPriorityQueue
 
 
 class FakeClock:
@@ -262,6 +265,58 @@ class OriginTests(unittest.TestCase):
         self.assertEqual(b"/v1/second", second.value)
         self.assertEqual(["/v1/first", "/v1/second"], calls)
         self.assertEqual(b"/v1/second", service.get("shared").value)
+
+    def test_origin_lineage_omits_query_while_request_and_identity_keep_it(self):
+        storage = CacheEngine(clock=self.clock)
+        intelligence = CacheIntelligence(storage, enabled=True)
+        calls = []
+
+        def transport(origin, path, addresses):
+            calls.append(path)
+            return OriginResponse(200, path.encode("ascii"))
+
+        service = self.service(intelligence, make_origin(), transport)
+        first_path = "/v1/item?token=top-secret"
+        second_path = "/v1/item?token=different"
+        service.fetch("shared", "catalog", first_path)
+        raw = storage.export_entries(("shared",))[0].value
+        explanation = intelligence.explain("shared")
+
+        self.assertEqual([first_path], calls)
+        self.assertEqual("/v1/item", raw["path"])
+        self.assertNotIn("top-secret", json.dumps(raw))
+        self.assertEqual(
+            "/v1/item", explanation["current"]["lineage"]["path"]
+        )
+        self.assertNotIn("top-secret", json.dumps(explanation))
+
+        service.fetch("shared", "catalog", second_path)
+        self.assertEqual([first_path, second_path], calls)
+
+    def test_refresh_queue_promotes_old_jobs_under_sustained_high_priority(self):
+        refresh_queue = _AgingPriorityQueue(2, self.clock, 1.0)
+        low = ("low", "catalog", "/v1/low")
+        refresh_queue.put_nowait((900, 1, self.clock(), low))
+        self.clock.advance(0.5)
+        refresh_queue.put_nowait(
+            (0, 2, self.clock(), ("high-1", "catalog", "/v1/high-1"))
+        )
+        self.assertEqual("high-1", refresh_queue.get_nowait()[3][0])
+        refresh_queue.task_done()
+
+        self.clock.advance(0.6)
+        refresh_queue.put_nowait(
+            (0, 3, self.clock(), ("high-2", "catalog", "/v1/high-2"))
+        )
+        self.assertEqual(low, refresh_queue.get_nowait()[3])
+        refresh_queue.task_done()
+        refresh_queue.put_nowait(
+            (0, 4, self.clock(), ("high-3", "catalog", "/v1/high-3"))
+        )
+        with self.assertRaises(queue.Full):
+            refresh_queue.put_nowait(
+                (0, 5, self.clock(), ("overflow", "catalog", "/v1/overflow"))
+            )
 
     def test_delete_cancels_refresh_ownership_without_resurrection(self):
         started = threading.Event()

@@ -59,11 +59,21 @@ Refresh-ahead is triggered by a read; MegaCache does not scan the entire key
 space. Background jobs use the same singleflight, admission, retry, timeout,
 and breaker policy as foreground work.
 
+When version 0.9 intelligence is enabled, positive origin refreshes may use a
+shorter TTL based on bounded observed content-change history. The declared
+`ttl_seconds` remains a hard ceiling, negative TTL is never adapted, and fewer
+than two observed loads retain the declared value. Background refresh jobs are
+ordered by deterministic bounded access, recency, and load-cost evidence while
+retaining the same queue limit and admission safeguards.
+
 Origin hits require a valid internal positive or negative marker with the same
-origin name and normalized path. An ordinary value written through the cache
-API never satisfies origin lineage and is refreshed instead. Invalidating an
-origin entry's tag also removes its refresh lease atomically, so an older
-in-flight refresh cannot restore the invalidated value.
+origin name and request identity. The full normalized path and query are sent
+to the origin and hashed for cache identity, while persisted and explained
+lineage contains only the path so query credentials are not disclosed. An
+ordinary value written through the cache API never satisfies origin lineage
+and is refreshed instead. Invalidating an origin entry's tag also removes its
+refresh lease atomically, so an older in-flight refresh cannot restore the
+invalidated value.
 
 ## Capacity and resilience policy
 

@@ -1,6 +1,6 @@
 # MegaCache SDKs
 
-Version 0.8.0 SDK source, package metadata, examples, and conformance tests:
+Version 0.9.0 SDK source, package metadata, examples, and conformance tests:
 
 - [`python`](python/README.md) — install the repository root package
 - [`node`](node/README.md) — package `@megacache/client`

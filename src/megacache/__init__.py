@@ -78,10 +78,12 @@ from .origin import (
     load_origin_definitions,
     validate_origin_path,
 )
+from .intelligence import CacheIntelligence
 from .storage import StorageBackend, StorageEntry
 
 __all__ = [
     "CacheEngine",
+    "CacheIntelligence",
     "CacheResult",
     "CachePolicy",
     "CachedValue",
@@ -155,4 +157,4 @@ __all__ = [
     "webhook_signature_payload",
     "validate_origin_path",
 ]
-__version__ = "0.8.0"
+__version__ = "0.9.0"

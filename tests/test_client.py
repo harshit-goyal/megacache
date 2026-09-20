@@ -18,6 +18,7 @@ from megacache.client import (
 from megacache.config import Config
 from megacache.engine import CacheEngine
 from megacache.integrations import wsgi_traceparent
+from megacache.intelligence import CacheIntelligence
 from megacache.origin import HTTPOrigin, OriginCache, OriginResponse
 from megacache.resp import MegaCacheRespServer
 
@@ -51,7 +52,9 @@ class NativeClientTests(unittest.TestCase):
             return OriginResponse(200, path.encode("utf-8"))
 
         cls.engine = OriginCache(
-            CacheEngine(max_entries=100),
+            CacheIntelligence(
+                CacheEngine(max_entries=100), enabled=True
+            ),
             [
                 HTTPOrigin.from_dict(
                     {
@@ -154,12 +157,32 @@ class NativeClientTests(unittest.TestCase):
         self.assertEqual(1, code)
         self.assertEqual("(nil)", output.getvalue().strip())
 
+    def test_native_cli_explain(self):
+        self.engine.put("product:explain", "value", ttl_seconds=60)
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = run(
+                [
+                    "--port",
+                    str(self.port),
+                    "--password",
+                    "secret",
+                    "--json",
+                    "explain",
+                    "product:explain",
+                ]
+            )
+        self.assertEqual(0, code)
+        document = __import__("json").loads(output.getvalue())
+        self.assertEqual("fresh", document["current"]["state"])
+        self.assertIn("recommended_policy", document)
+
     def test_native_cli_reports_version(self):
         output = io.StringIO()
         with redirect_stdout(output), self.assertRaises(SystemExit) as exit_status:
             run(["--version"])
         self.assertEqual(0, exit_status.exception.code)
-        self.assertEqual("MegaCache 0.8.0", output.getvalue().strip())
+        self.assertEqual("MegaCache 0.9.0", output.getvalue().strip())
 
     def test_native_cli_fetches_only_from_a_named_origin(self):
         output = io.StringIO()

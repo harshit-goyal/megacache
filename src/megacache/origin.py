@@ -6,6 +6,7 @@ import http.client
 import inspect
 import base64
 import hashlib
+import heapq
 import ipaddress
 import json
 import math
@@ -13,6 +14,7 @@ import posixpath
 import queue
 import random
 import re
+import secrets
 import socket
 import ssl
 import threading
@@ -39,6 +41,7 @@ _FORBIDDEN_HEADERS = {
     "transfer-encoding",
 }
 _RETRYABLE_STATUS = {408, 425, 429, 500, 502, 503, 504}
+_REFRESH_PROMOTION_SECONDS = 1.0
 _TRANSITION_NETWORKS = tuple(
     ipaddress.ip_network(value)
     for value in (
@@ -61,6 +64,37 @@ _LOW32_EMBEDDED_NETWORKS = tuple(
         "64:ff9b:1::/48",
     )
 )
+
+
+class _AgingPriorityQueue(queue.PriorityQueue):
+    def __init__(
+        self,
+        maxsize: int,
+        clock: Callable[[], float],
+        promotion_seconds: float,
+    ) -> None:
+        super().__init__(maxsize=maxsize)
+        self._clock = clock
+        self._promotion_seconds = promotion_seconds
+
+    def _get(self) -> Any:
+        for index, item in enumerate(self.queue):
+            if item[3] is None:
+                selected = self.queue.pop(index)
+                heapq.heapify(self.queue)
+                return selected
+        now = self._clock()
+        overdue = [
+            (item[1], index)
+            for index, item in enumerate(self.queue)
+            if now - item[2] >= self._promotion_seconds
+        ]
+        if overdue:
+            _, index = min(overdue)
+            selected = self.queue.pop(index)
+            heapq.heapify(self.queue)
+            return selected
+        return heapq.heappop(self.queue)
 
 
 class OriginError(Exception):
@@ -660,9 +694,12 @@ class OriginCache:
         self._global = _AdmissionBudget(
             global_max_concurrency, global_max_queue
         )
-        self._refresh_queue: "queue.Queue[Any]" = queue.Queue(
-            maxsize=refresh_queue_size
+        self._refresh_queue: "queue.PriorityQueue[Any]" = _AgingPriorityQueue(
+            refresh_queue_size,
+            clock,
+            _REFRESH_PROMOTION_SECONDS,
         )
+        self._refresh_sequence = 0
         self._scheduled = set()
         self._scheduled_lock = threading.Lock()
         self._closed = threading.Event()
@@ -898,7 +935,10 @@ class OriginCache:
             runtime.admission.close()
         for _ in self._workers:
             try:
-                self._refresh_queue.put_nowait(None)
+                self._refresh_sequence += 1
+                self._refresh_queue.put_nowait(
+                    (-1, self._refresh_sequence, self._clock(), None)
+                )
             except queue.Full:
                 break
 
@@ -1012,9 +1052,11 @@ class OriginCache:
         guard.start()
         try:
             try:
+                load_started = time.perf_counter()
                 response, attempts = self._request_with_retries(
                     runtime, path, traceparent
                 )
+                load_duration = time.perf_counter() - load_started
                 guard.ensure_owned()
             except OriginUnavailable as exc:
                 self.storage.release_lease(key, lease_token)
@@ -1047,7 +1089,8 @@ class OriginCache:
                     {
                         _NEGATIVE_MARKER: True,
                         "origin": origin.name,
-                        "path": path,
+                        "path": _lineage_path(path),
+                        "request_hash": _request_path_hash(path),
                         "status": response.status,
                     },
                     ttl_seconds=origin.negative_ttl_seconds,
@@ -1062,16 +1105,26 @@ class OriginCache:
                     status_code=response.status,
                     attempts=attempts,
                 )
+            adaptive = getattr(self.storage, "adaptive_ttl", None)
+            ttl_seconds = origin.ttl_seconds
+            if adaptive is not None:
+                try:
+                    ttl_seconds = adaptive(
+                        key, origin.name, origin.ttl_seconds
+                    )
+                except Exception:
+                    runtime.increment("intelligence_errors_total")
             self._put_origin_value(
                 key,
                 {
                     _VALUE_MARKER: True,
                     "origin": origin.name,
-                    "path": path,
+                    "path": _lineage_path(path),
+                    "request_hash": _request_path_hash(path),
                     "status": response.status,
                     "body": base64.b64encode(response.body).decode("ascii"),
                 },
-                ttl_seconds=origin.ttl_seconds,
+                ttl_seconds=ttl_seconds,
                 stale_seconds=(
                     origin.stale_while_revalidate_seconds
                     + origin.stale_if_error_seconds
@@ -1079,6 +1132,14 @@ class OriginCache:
                 tags=origin.tags,
                 lease_token=lease_token,
             )
+            record_load = getattr(self.storage, "record_origin_load", None)
+            if record_load is not None:
+                try:
+                    record_load(
+                        key, origin.name, load_duration, response.body
+                    )
+                except Exception:
+                    runtime.increment("intelligence_errors_total")
             return OriginFetchResult(
                 state="refreshed",
                 origin=origin.name,
@@ -1094,7 +1155,10 @@ class OriginCache:
 
     def _put_origin_value(self, key: str, value: Any, **kwargs: Any) -> None:
         try:
-            self.storage.put(key, value, **kwargs)
+            putter = getattr(self.storage, "put_origin_value", None)
+            if putter is None:
+                putter = self.storage.put
+            putter(key, value, **kwargs)
         except ValueError as exc:
             if "lease" in str(exc).lower():
                 raise OriginUnavailable(
@@ -1263,7 +1327,28 @@ class OriginCache:
                 return
             self._scheduled.add(job)
             try:
-                self._refresh_queue.put_nowait(job)
+                priority_method = getattr(
+                    self.storage, "refresh_priority", None
+                )
+                try:
+                    priority = (
+                        1000
+                        if priority_method is None
+                        else int(priority_method(key, origin))
+                    )
+                except Exception:
+                    priority = 1000
+                    self._runtime(origin).increment(
+                        "intelligence_errors_total"
+                    )
+                if priority_method is not None:
+                    self._runtime(origin).increment(
+                        "refresh_prioritized_total"
+                    )
+                self._refresh_sequence += 1
+                self._refresh_queue.put_nowait(
+                    (priority, self._refresh_sequence, self._clock(), job)
+                )
             except queue.Full:
                 self._scheduled.remove(job)
                 self._runtime(origin).increment("refresh_load_shed_total")
@@ -1271,7 +1356,7 @@ class OriginCache:
     def _worker(self) -> None:
         while True:
             try:
-                job = self._refresh_queue.get(timeout=0.1)
+                _, _, _, job = self._refresh_queue.get(timeout=0.1)
             except queue.Empty:
                 if self._closed.is_set():
                     return
@@ -1459,7 +1544,7 @@ def _http_transport(
     headers = dict(origin.headers)
     headers["Host"] = origin.authority
     headers.setdefault("Accept-Encoding", "identity")
-    headers.setdefault("User-Agent", "MegaCache/0.8")
+    headers.setdefault("User-Agent", "MegaCache/0.9")
     if propagated_headers:
         headers.update(propagated_headers)
     try:
@@ -1620,7 +1705,7 @@ def _request_envelope_seconds(origin: HTTPOrigin) -> float:
 
 def _negative_origin_value(
     value: Any,
-) -> Optional[Tuple[str, str, int]]:
+) -> Optional[Tuple[str, str, int, Optional[str]]]:
     if not (
         isinstance(value, dict)
         and value.get(_NEGATIVE_MARKER) is True
@@ -1631,7 +1716,10 @@ def _negative_origin_value(
         and 400 <= value["status"] <= 499
     ):
         return None
-    return value["origin"], value["path"], value["status"]
+    request_hash = value.get("request_hash")
+    if request_hash is not None and not isinstance(request_hash, str):
+        return None
+    return value["origin"], value["path"], value["status"], request_hash
 
 
 def _negative_value(value: Any) -> Optional[int]:
@@ -1641,7 +1729,7 @@ def _negative_value(value: Any) -> Optional[int]:
 
 def _origin_value(
     value: Any,
-) -> Optional[Tuple[str, str, int, bytes]]:
+) -> Optional[Tuple[str, str, int, bytes, Optional[str]]]:
     if not (
         isinstance(value, dict)
         and value.get(_VALUE_MARKER) is True
@@ -1657,7 +1745,10 @@ def _origin_value(
         body = base64.b64decode(value["body"], validate=True)
     except (ValueError, TypeError):
         return None
-    return value["origin"], value["path"], value["status"], body
+    request_hash = value.get("request_hash")
+    if request_hash is not None and not isinstance(request_hash, str):
+        return None
+    return value["origin"], value["path"], value["status"], body, request_hash
 
 
 def _decode_cache_result(
@@ -1665,7 +1756,10 @@ def _decode_cache_result(
 ) -> Tuple[CacheResult, bool]:
     positive = _origin_value(result.value)
     if positive is not None:
-        if positive[0] != origin.name or positive[1] != path:
+        if (
+            positive[0] != origin.name
+            or not _lineage_matches(positive[1], positive[4], path)
+        ):
             return result, False
         return (
             CacheResult(
@@ -1683,10 +1777,28 @@ def _decode_cache_result(
         return (
             result,
             negative[0] == origin.name
-            and negative[1] == path
+            and _lineage_matches(negative[1], negative[3], path)
             and negative[2] in origin.negative_statuses,
         )
     return result, False
+
+
+def _lineage_path(path: str) -> str:
+    return urlsplit(path).path
+
+
+def _request_path_hash(path: str) -> str:
+    return hashlib.sha256(path.encode("utf-8")).hexdigest()
+
+
+def _lineage_matches(
+    stored_path: str,
+    stored_hash: Optional[str],
+    request_path: str,
+) -> bool:
+    if stored_hash is not None:
+        return secrets.compare_digest(stored_hash, _request_path_hash(request_path))
+    return stored_path == request_path
 
 
 def _matches_prefix(path: str, prefix: str) -> bool:

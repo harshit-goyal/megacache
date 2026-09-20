@@ -9,10 +9,10 @@ lease-protected refreshes, tag invalidation, bounded memory, and useful
 operational metrics. Clients can use either Redis-compatible RESP2 commands or
 the HTTP API.
 
-> MegaCache is an alpha release. Version 0.8 adds supported dependency-free
-> Python, Node.js, Go, and Java SDKs, a shared conformance suite, bounded L1
-> caching with L2 lease coordination, invalidation polling, and W3C
-> `traceparent` propagation hooks.
+> MegaCache is an alpha release. Version 0.9 adds conservative, deterministic
+> cache intelligence: bounded telemetry, adaptive origin TTL, optional
+> cost-aware eviction, in-process hot-key copies, prioritized refresh,
+> explainability, dry-run recommendations, and guarded experiments.
 > Cluster coordination remains in-process: separately deployed processes do
 > not form a cluster.
 
@@ -54,6 +54,9 @@ related keys stale. MegaCache makes the safe path explicit:
 - **Zero runtime dependencies** keeps deployment and auditing simple.
 - **Four supported SDKs** share RESP2 semantics, typed errors, bounded local
   caches, request coalescing, and trace-context hooks.
+- **Optional cache intelligence** uses bounded counters and transparent
+  formulas—no ML claims, runtime dependencies, untrusted expressions, or
+  unbounded key labels.
 
 ## Quick start
 
@@ -80,6 +83,10 @@ mc invalidate catalog
 mc topology
 mc topology product:123
 mc status
+mc explain product:123
+mc recommendations
+mc policy-simulate policy-simulation.example.json
+mc experiments
 mc event change.json
 mc events-status
 ```
@@ -210,6 +217,22 @@ This prevents a cache stampede without trusting a client-side distributed lock.
 | `MEGACACHE_EVENT_GRAPH_MAX_FANOUT` | `100` | Dependents allowed per key |
 | `MEGACACHE_EVENT_GRAPH_MAX_DEPTH` | `16` | Invalidation traversal depth |
 | `MEGACACHE_EVENT_GRAPH_MAX_INVALIDATION_NODES` | `10000` | Keys visited per event |
+| `MEGACACHE_INTELLIGENCE_ENABLED` | `false` | Enable bounded telemetry, explanations, hot-key handling, and policy controls |
+| `MEGACACHE_ADAPTIVE_TTL_ENABLED` | `false` | Adapt positive origin TTLs without exceeding their configured TTL |
+| `MEGACACHE_INTELLIGENCE_MIN_TTL_SECONDS` | `5` | Lower adaptive TTL clamp |
+| `MEGACACHE_INTELLIGENCE_MAX_TTL_SECONDS` | `3600` | Upper adaptive TTL clamp; origin TTL remains the hard ceiling |
+| `MEGACACHE_INTELLIGENCE_MAX_KEYS` | `10000` | Maximum retained per-key telemetry records |
+| `MEGACACHE_INTELLIGENCE_MAX_CLASSES` | `128` | Maximum retained class aggregates |
+| `MEGACACHE_EVICTION_POLICY` | `lru` | `lru` or opt-in deterministic `cost` |
+| `MEGACACHE_HOT_KEY_THRESHOLD` | `100` | Accesses required to classify a key as hot |
+| `MEGACACHE_HOT_KEY_WINDOW_SECONDS` | `60` | Idle gap that resets hot-key access count |
+| `MEGACACHE_HOT_KEY_EXTRA_REPLICAS` | `1` | Best-effort extra in-process logical copies |
+| `MEGACACHE_EXPERIMENT_ENABLED` | `false` | Enable deterministic policy experiment allocation |
+| `MEGACACHE_EXPERIMENT_ID` | `adaptive-ttl-v1` | Stable experiment allocation identifier |
+| `MEGACACHE_EXPERIMENT_ALLOCATION_PERCENT` | `0` | Candidate allocation from 0 through 100 |
+| `MEGACACHE_EXPERIMENT_MIN_SAMPLES` | `100` | Required hit/miss observations per arm |
+| `MEGACACHE_EXPERIMENT_MAX_MISS_REGRESSION` | `0.05` | Candidate miss-rate regression guardrail |
+| `MEGACACHE_INTELLIGENCE_STATE_FILE` | `megacache-intelligence-state.json` | Local atomic experiment decision audit |
 
 The native client also reads `MEGACACHE_CLI_HOST`,
 `MEGACACHE_CLI_PORT`, `MEGACACHE_CLI_USERNAME`,
@@ -246,6 +269,7 @@ clients.
 - [Operations and deployment](docs/operations.md)
 - [Implementation roadmap](docs/roadmap.md)
 - [SDKs and framework integrations](docs/sdks.md)
+- [Cache intelligence](docs/intelligence.md)
 - [Versioning policy](docs/versioning.md)
 - [Contributing](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)
@@ -254,9 +278,10 @@ clients.
 
 Phase 1 production foundations are available in version 0.4, Phase 2
 coordinator behavior in 0.5, Phase 3 HTTP origin protection in 0.6, Phase 4
-freshness automation in 0.7, and Phase 5 developer tooling in 0.8.
+freshness automation in 0.7, Phase 5 developer tooling in 0.8, and Phase 6
+cache intelligence in 0.9.
 Secure inter-process transport remains a documented boundary rather than a
-simulated guarantee. Cache intelligence and the managed control plane remain on the
+simulated guarantee. The managed control plane remains on the
 [implementation roadmap](docs/roadmap.md).
 
 ## License

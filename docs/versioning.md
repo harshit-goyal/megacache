@@ -1,7 +1,7 @@
 # Versioning policy
 
 MegaCache follows Semantic Versioning 2.0.0 for the server, wire extensions,
-and all supported SDKs. Version 0.8.0 keeps the SDKs in lockstep with the
+and all supported SDKs. Version 0.9.0 keeps the SDKs in lockstep with the
 server.
 
 Before 1.0, a minor release may make incompatible API changes only when the
