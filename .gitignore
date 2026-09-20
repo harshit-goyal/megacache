@@ -7,5 +7,8 @@ __pycache__/
 .venv/
 users.json
 *.users.json
+events.json
+events-state.json
+megacache-events-state.json
 build/
 dist/

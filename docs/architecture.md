@@ -21,6 +21,11 @@ origin metrics. Origin values carry internal lineage metadata so reusing one
 cache key with a different origin path cannot return the earlier path's value;
 ordinary HTTP and RESP cache reads receive only the original body.
 
+`EventAutomation` is the outer storage facade in version 0.7. It preserves the
+storage API and adds normalized event ingestion, webhook authentication,
+durable checkpoints, idempotency, dead letters, dependency traversal, and
+event metrics. It can wrap `OriginCache`, `ClusterStorage`, or `CacheEngine`.
+
 ## Distributed coordination
 
 `ClusterStorage` is a well-defined in-process coordinator. Every node has a
@@ -170,6 +175,43 @@ PBKDF2-HMAC-SHA256 hashes with at least 100,000 iterations. Permissions are
 read and write operations. Administrator permission implies every permission.
 The legacy API key authenticates an unrestricted administrator for migration.
 
+Normal HTTP and RESP event ingestion requires `invalidate` permission.
+Webhook routes use a separate configured HMAC-SHA256 secret and sign
+length-framed source, timestamp, delivery ID, and exact body bytes. They
+enforce a bounded timestamp tolerance and atomically claim a bounded delivery
+identifier before processing. Live claims are retained for the full tolerance
+and capacity exhaustion applies backpressure. Webhook secrets are never
+logged.
+
+## Freshness event processing
+
+Events carry a stable ID plus an ordered `(source, stream, position)`
+checkpoint. The ingestor rejects already-seen IDs and positions at or behind
+the durable checkpoint. It prepares schema-compatible payloads, renders
+declarative key/tag templates, and precomputes the complete dependency closure
+under visited-node, fanout, depth, edge, and total-node bounds. A closure that
+exceeds a traversal bound is rejected before any invalidation or checkpoint
+mutation. Valid closures are invalidated before committing the checkpoint.
+
+This ordering intentionally provides at-least-once invalidation. A process
+failure before the atomic state-file replacement can repeat an invalidation,
+but cannot acknowledge and silently skip it. Processing failures and their
+advanced checkpoints enter the durable bounded DLQ in one state-file update.
+DLQ count/byte exhaustion rejects the failure before checkpoint advancement;
+unresolved failures are never evicted. Retry metadata records attempts,
+failure times, and exponential retry delay.
+
+Schema identifiers use `name@version`. Compatible reader ranges are explicit;
+payload migration requires an application-registered callable. Versioned
+namespaces use `name:vN:key` and `strict`, `rolling`, or `dual_write` policies
+so mixed deployment versions can invalidate every readable representation.
+
+The Kafka-style `RecordConsumer` abstraction and PostgreSQL logical, MySQL
+binlog, and MongoDB change-stream adapters consume externally supplied records.
+No broker or database protocol client is bundled. Native drivers retain
+responsibility for authentication, connection lifecycle, slot/group ownership,
+and translating source cursors to the adapters' monotonic positions.
+
 ## Observability
 
 HTTP routes and RESP command names are recorded as bounded operation labels.
@@ -215,7 +257,7 @@ deployed processes have independent flights and can each contact the origin.
 
 ## Explicit non-guarantees
 
-Version 0.6 does not ship a node discovery service or authenticated,
+Version 0.7 does not ship a node discovery service or authenticated,
 encrypted node-to-node RPC transport. `MEGACACHE_CLUSTER_NODES` creates
 multiple logical stores inside one process; loss of that process loses every
 logical node and all cache data. The coordinator interfaces can model missing
@@ -228,9 +270,16 @@ Entries are not persisted. Restarting the process empties the cache. Use the
 coordinator as an embedded/testable distributed state machine until a secure
 transport implements the same interfaces.
 
-HTTP origin definitions are loaded only at startup. Version 0.6 has no database
-origin adapter and no credential-refresh mechanism for fixed origin headers.
+HTTP origin and event definitions are loaded only at startup. Version 0.7 has
+no database or Kafka wire client and no credential-refresh mechanism for fixed
+origin headers or webhook secrets.
 Refresh workers and singleflight state are in-process and are lost at restart.
+
+The event state file is durable and atomically replaced, but it is not a
+multi-process consensus store. Exactly one MegaCache process may own it;
+processes enforce this with a lifetime advisory lock on a sibling lock file.
+Cache entries remain in-memory, so a restart can make a replayed invalidation a
+no-op even though the checkpoint correctly records source progress.
 
 Clients remain responsible for deciding whether stale data is safe for their
 domain. Never cache authorization decisions, secrets, or correctness-critical

@@ -9,8 +9,9 @@ lease-protected refreshes, tag invalidation, bounded memory, and useful
 operational metrics. Clients can use either Redis-compatible RESP2 commands or
 the HTTP API.
 
-> MegaCache is an alpha release. Version 0.6 adds protected read-through HTTP
-> origins, automated refresh, resilience policies, and origin observability.
+> MegaCache is an alpha release. Version 0.7 adds durable freshness-event
+> ingestion, authenticated webhooks, change-data-capture adapter interfaces,
+> schema-aware rolling invalidation, and bounded dependency propagation.
 > Cluster coordination remains in-process: separately deployed processes do
 > not form a cluster.
 
@@ -44,6 +45,11 @@ related keys stale. MegaCache makes the safe path explicit:
   workers, concurrency and queue limits, retry budgets, and circuit breakers.
 - **Freshness policies** support refresh-ahead, stale-while-revalidate,
   stale-if-error, and negative caching.
+- **Durable freshness events** provide replay checkpoints, idempotency,
+  bounded dead letters, key/tag transformations, and dependency invalidation.
+- **Honest CDC integration boundaries** provide externally-fed Kafka,
+  PostgreSQL, MySQL, and MongoDB adapters without pretending to bundle their
+  network clients.
 - **Zero runtime dependencies** keeps deployment and auditing simple.
 
 ## Quick start
@@ -71,6 +77,8 @@ mc invalidate catalog
 mc topology
 mc topology product:123
 mc status
+mc event change.json
+mc events-status
 ```
 
 Redis clients remain supported through RESP2:
@@ -164,6 +172,22 @@ This prevents a cache stampede without trusting a client-side distributed lock.
 | `MEGACACHE_ORIGIN_REFRESH_QUEUE_SIZE` | `1000` | Bounded background refresh queue |
 | `MEGACACHE_ORIGIN_GLOBAL_MAX_CONCURRENCY` | `64` | Process-wide active origin-request limit |
 | `MEGACACHE_ORIGIN_GLOBAL_MAX_QUEUE` | `256` | Process-wide waiting origin-request limit |
+| `MEGACACHE_EVENTS_FILE` | unset | Event rules, schemas, namespaces, dependencies, and webhooks |
+| `MEGACACHE_EVENT_STATE_FILE` | `megacache-events-state.json` | Durable checkpoint, deduplication, replay, and DLQ state |
+| `MEGACACHE_EVENT_MAX_SEEN` | `10000` | Retained event idempotency identifiers |
+| `MEGACACHE_EVENT_MAX_REPLAY_TOKENS` | `10000` | Retained webhook delivery claims |
+| `MEGACACHE_EVENT_MAX_DEAD_LETTERS` | `1000` | Maximum dead-letter entries |
+| `MEGACACHE_EVENT_MAX_DEAD_LETTER_BYTES` | `8388608` | Maximum serialized bytes across unresolved dead letters |
+| `MEGACACHE_EVENT_MAX_STREAMS` | `1000` | Maximum distinct checkpointed source/stream pairs |
+| `MEGACACHE_EVENT_MAX_STATE_BYTES` | `16777216` | Maximum serialized durable event-state size |
+| `MEGACACHE_EVENT_MAX_PAYLOAD_BYTES` | `1048576` | Maximum serialized payload bytes per event |
+| `MEGACACHE_EVENT_MAX_CURSOR_BYTES` | `4096` | Maximum UTF-8 bytes in a native source cursor |
+| `MEGACACHE_EVENT_MAX_ERROR_BYTES` | `4096` | Maximum retained UTF-8 bytes per DLQ error |
+| `MEGACACHE_EVENT_GRAPH_MAX_NODES` | `10000` | Dependency graph node limit |
+| `MEGACACHE_EVENT_GRAPH_MAX_EDGES` | `50000` | Dependency graph edge limit |
+| `MEGACACHE_EVENT_GRAPH_MAX_FANOUT` | `100` | Dependents allowed per key |
+| `MEGACACHE_EVENT_GRAPH_MAX_DEPTH` | `16` | Invalidation traversal depth |
+| `MEGACACHE_EVENT_GRAPH_MAX_INVALIDATION_NODES` | `10000` | Keys visited per event |
 
 The native client also reads `MEGACACHE_CLI_HOST`,
 `MEGACACHE_CLI_PORT`, `MEGACACHE_CLI_USERNAME`,
@@ -184,12 +208,18 @@ rejected unless covered by an explicit `allowed_ip_networks` CIDR; embedded
 IPv4 addresses follow the same policy. `mc fetch` accepts only a configured
 origin name and an allowed absolute path—not a URL.
 
+Configure freshness automation with `events.example.json`; see
+[Freshness events and CDC adapters](docs/events.md). MegaCache provides
+dependency-free adapter contracts and does not ship Kafka or database wire
+clients.
+
 ## Documentation
 
 - [Command reference](docs/commands.md)
 - [RESP2 and Redis command reference](docs/resp.md)
 - [HTTP API](docs/api.md)
 - [HTTP origin configuration](docs/origins.md)
+- [Freshness events and CDC adapters](docs/events.md)
 - [Architecture and guarantees](docs/architecture.md)
 - [Operations and deployment](docs/operations.md)
 - [Implementation roadmap](docs/roadmap.md)
@@ -199,10 +229,10 @@ origin name and an allowed absolute path—not a URL.
 ## Roadmap
 
 Phase 1 production foundations are available in version 0.4, Phase 2
-coordinator behavior in 0.5, and Phase 3 HTTP origin protection in 0.6.
+coordinator behavior in 0.5, Phase 3 HTTP origin protection in 0.6, and Phase
+4 freshness automation in 0.7.
 Secure inter-process transport remains a documented boundary rather than a
-simulated guarantee. Change-stream freshness automation, SDKs, cache
-intelligence, and the managed control plane remain on the
+simulated guarantee. SDKs, cache intelligence, and the managed control plane remain on the
 [implementation roadmap](docs/roadmap.md).
 
 ## License

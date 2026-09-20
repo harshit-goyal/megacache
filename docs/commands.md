@@ -86,6 +86,19 @@ mc serve
 Origins are loaded at startup. The server never accepts a destination URL from
 a client; callers select a configured origin and supply only an allowed path.
 
+Enable freshness events with a declarative file and durable state path:
+
+```bash
+cp events.example.json events.json
+export MEGACACHE_EVENTS_FILE="$PWD/events.json"
+export MEGACACHE_EVENT_STATE_FILE="$PWD/events-state.json"
+export MEGACACHE_CATALOG_WEBHOOK_SECRET='replace-with-a-long-random-secret'
+mc serve
+```
+
+The bundled Kafka and database integrations are externally-fed adapter
+interfaces, not network clients. See [Freshness events](events.md).
+
 The examples below use this shell variable:
 
 ```bash
@@ -170,6 +183,7 @@ mc topology
 mc topology product:123
 mc status
 mc origins
+mc events-status
 ```
 
 `mc topology` reports the ring version and fingerprint, leader term, logical
@@ -178,6 +192,17 @@ state. Supplying a key reports its primary and replica owners. `mc status`
 returns a compact health summary. Both require administrator permission.
 `mc origins` reports per-origin breaker state, active concurrency, queue depth,
 retry tokens, and failure count; it also requires administrator permission.
+
+Submit a normalized event from a file or standard input:
+
+```bash
+mc event change.json
+cat change.json | mc event
+mc events-retry --limit 25
+```
+
+`mc event` requires `invalidate` permission. Event status and retries require
+administrator permission.
 
 Clear all entries only with explicit confirmation:
 
@@ -419,6 +444,6 @@ python3 -m pip wheel --no-deps --wheel-dir dist .
 Install the generated wheel:
 
 ```bash
-python3 -m pip install dist/megacache-0.6.0-py3-none-any.whl
+python3 -m pip install dist/megacache-0.7.0-py3-none-any.whl
 mc
 ```

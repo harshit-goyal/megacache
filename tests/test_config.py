@@ -82,6 +82,36 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(12, config.origin_global_max_concurrency)
         self.assertEqual(0, config.origin_global_max_queue)
 
+    def test_event_environment_is_parsed(self):
+        with patch.dict(
+            os.environ,
+            {
+                "MEGACACHE_NODE_ID": "node-a",
+                "MEGACACHE_EVENTS_FILE": "events.json",
+                "MEGACACHE_EVENT_STATE_FILE": "state.json",
+                "MEGACACHE_EVENT_MAX_DEAD_LETTERS": "20",
+                "MEGACACHE_EVENT_MAX_DEAD_LETTER_BYTES": "2000",
+                "MEGACACHE_EVENT_MAX_STREAMS": "30",
+                "MEGACACHE_EVENT_MAX_STATE_BYTES": "4000",
+                "MEGACACHE_EVENT_MAX_PAYLOAD_BYTES": "500",
+                "MEGACACHE_EVENT_MAX_CURSOR_BYTES": "60",
+                "MEGACACHE_EVENT_MAX_ERROR_BYTES": "70",
+                "MEGACACHE_EVENT_GRAPH_MAX_FANOUT": "8",
+            },
+            clear=True,
+        ):
+            config = Config.from_env()
+        self.assertEqual("events.json", config.events_file)
+        self.assertEqual("state.json", config.event_state_file)
+        self.assertEqual(20, config.event_max_dead_letters)
+        self.assertEqual(2000, config.event_max_dead_letter_bytes)
+        self.assertEqual(30, config.event_max_streams)
+        self.assertEqual(4000, config.event_max_state_bytes)
+        self.assertEqual(500, config.event_max_payload_bytes)
+        self.assertEqual(60, config.event_max_cursor_bytes)
+        self.assertEqual(70, config.event_max_error_bytes)
+        self.assertEqual(8, config.event_graph_max_fanout)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -168,6 +168,37 @@ Returns compact JSON containing each configured origin's circuit-breaker state,
 active concurrency, bounded queue depth, retry tokens, and failure count.
 Administrator permission is required.
 
+### `MC.EVENT`
+
+Submits one normalized JSON event using the same ingestion core as HTTP and
+configured webhooks:
+
+```text
+MC.EVENT '{"event_id":"catalog-1042","source":"postgres","stream":"slot","position":1042,"operation":"update","payload":{"id":42}}'
+```
+
+The caller needs `invalidate` permission. The compact JSON response reports the
+outcome, checkpoint, invalidation counts, and graph truncation.
+
+### `MC.EVENT.STATUS`
+
+Returns compact JSON containing durable checkpoints and source cursors,
+deduplication and webhook replay counts, DLQ depth, rules, schema readers,
+namespaces, dependency graph bounds, and event metrics. Administrator
+permission is required.
+
+### `MC.EVENT.RETRY`
+
+Retries due retryable dead letters:
+
+```text
+MC.EVENT.RETRY
+MC.EVENT.RETRY 25
+```
+
+The optional positive limit defaults to 100. Administrator permission is
+required.
+
 ## Compatibility boundaries
 
 MegaCache currently supports RESP2 string-cache workflows. It does

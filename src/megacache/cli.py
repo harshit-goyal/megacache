@@ -17,6 +17,7 @@ from .client import MegaCacheClient, MegaCacheClientError
 from .cluster import ClusterNode, ClusterStorage
 from .config import Config
 from .engine import CacheEngine
+from .events import load_event_automation
 from .observability import configure_logging
 from .origin import OriginCache
 from .resp import MegaCacheRespServer
@@ -30,7 +31,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Run and interact with MegaCache.",
     )
     parser.add_argument(
-        "--version", action="version", version="MegaCache 0.6.0"
+        "--version", action="version", version="MegaCache 0.7.0"
     )
     parser.add_argument(
         "--host",
@@ -158,6 +159,19 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser(
         "origins", help="show configured origin health and breaker state"
     )
+    event = commands.add_parser(
+        "event", help="ingest one freshness event from a JSON file or stdin"
+    )
+    event.add_argument(
+        "path", nargs="?", default="-", help="JSON event path (default: stdin)"
+    )
+    commands.add_parser(
+        "events-status", help="show event checkpoints, DLQ, and graph status"
+    )
+    retry_events = commands.add_parser(
+        "events-retry", help="retry due dead-letter events"
+    )
+    retry_events.add_argument("--limit", type=int, default=100)
 
     flush = commands.add_parser("flush", help="delete every cache entry")
     flush.add_argument(
@@ -280,6 +294,16 @@ def _execute(client: MegaCacheClient, args: argparse.Namespace) -> Any:
         return _decode_json_response(client.command("MC.STATUS"))
     if command == "origins":
         return _decode_json_response(client.command("MC.ORIGINS"))
+    if args.command == "event":
+        return _decode_json_response(
+            client.command("MC.EVENT", _read_event(args.path))
+        )
+    if args.command == "events-status":
+        return _decode_json_response(client.command("MC.EVENT.STATUS"))
+    if args.command == "events-retry":
+        return _decode_json_response(
+            client.command("MC.EVENT.RETRY", args.limit)
+        )
     if command == "flush":
         return client.command("FLUSHDB")
     if command == "lease":
@@ -338,6 +362,28 @@ def _serve(args: argparse.Namespace) -> int:
             refresh_queue_size=config.origin_refresh_queue_size,
             global_max_concurrency=config.origin_global_max_concurrency,
             global_max_queue=config.origin_global_max_queue,
+        )
+    if config.events_file is not None:
+        engine = load_event_automation(
+            engine,
+            config.events_file,
+            config.event_state_file,
+            max_seen_events=config.event_max_seen,
+            max_replay_tokens=config.event_max_replay_tokens,
+            max_dead_letters=config.event_max_dead_letters,
+            max_dead_letter_bytes=config.event_max_dead_letter_bytes,
+            max_streams=config.event_max_streams,
+            max_state_bytes=config.event_max_state_bytes,
+            max_payload_bytes=config.event_max_payload_bytes,
+            max_cursor_bytes=config.event_max_cursor_bytes,
+            max_error_bytes=config.event_max_error_bytes,
+            graph_max_nodes=config.event_graph_max_nodes,
+            graph_max_edges=config.event_graph_max_edges,
+            graph_max_fanout=config.event_graph_max_fanout,
+            graph_max_depth=config.event_graph_max_depth,
+            graph_max_invalidation_nodes=(
+                config.event_graph_max_invalidation_nodes
+            ),
         )
     http_server = MegaCacheServer((config.host, config.port), config, engine)
     resp_server = MegaCacheRespServer(
@@ -513,3 +559,17 @@ def _decode_json_response(value: Any) -> Any:
     if not isinstance(decoded, dict):
         raise ValueError("server returned invalid JSON")
     return decoded
+
+
+def _read_event(path: str) -> bytes:
+    try:
+        if path == "-":
+            value = json.load(sys.stdin)
+        else:
+            with open(path, "r", encoding="utf-8") as source:
+                value = json.load(source)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("unable to read event JSON: {}".format(exc)) from exc
+    if not isinstance(value, dict):
+        raise ValueError("event JSON must be an object")
+    return json.dumps(value, separators=(",", ":")).encode("utf-8")

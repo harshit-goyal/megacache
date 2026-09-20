@@ -12,6 +12,9 @@ _EXTRA_FIELDS = (
     "duration_ms",
     "remote",
     "username",
+    "event_source",
+    "event_stream",
+    "event_outcome",
 )
 
 
@@ -50,4 +53,3 @@ def configure_logging(format_name: str) -> None:
     root.handlers.clear()
     root.addHandler(handler)
     root.setLevel(logging.INFO)
-

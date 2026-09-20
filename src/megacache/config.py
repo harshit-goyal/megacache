@@ -106,6 +106,22 @@ class Config:
     origin_refresh_queue_size: int = 1_000
     origin_global_max_concurrency: int = 64
     origin_global_max_queue: int = 256
+    events_file: Optional[str] = None
+    event_state_file: str = "megacache-events-state.json"
+    event_max_seen: int = 10_000
+    event_max_replay_tokens: int = 10_000
+    event_max_dead_letters: int = 1_000
+    event_max_dead_letter_bytes: int = 8_388_608
+    event_max_streams: int = 1_000
+    event_max_state_bytes: int = 16_777_216
+    event_max_payload_bytes: int = 1_048_576
+    event_max_cursor_bytes: int = 4_096
+    event_max_error_bytes: int = 4_096
+    event_graph_max_nodes: int = 10_000
+    event_graph_max_edges: int = 50_000
+    event_graph_max_fanout: int = 100
+    event_graph_max_depth: int = 16
+    event_graph_max_invalidation_nodes: int = 10_000
 
     def __post_init__(self) -> None:
         if (
@@ -150,6 +166,22 @@ class Config:
             or self.origin_refresh_queue_size <= 0
             or self.origin_global_max_concurrency <= 0
             or self.origin_global_max_queue < 0
+            or not isinstance(self.event_state_file, str)
+            or not self.event_state_file
+            or self.event_max_seen <= 0
+            or self.event_max_replay_tokens <= 0
+            or self.event_max_dead_letters <= 0
+            or self.event_max_dead_letter_bytes <= 0
+            or self.event_max_streams <= 0
+            or self.event_max_state_bytes <= 0
+            or self.event_max_payload_bytes <= 0
+            or self.event_max_cursor_bytes <= 0
+            or self.event_max_error_bytes <= 0
+            or self.event_graph_max_nodes <= 0
+            or self.event_graph_max_edges <= 0
+            or self.event_graph_max_fanout <= 0
+            or self.event_graph_max_depth <= 0
+            or self.event_graph_max_invalidation_nodes <= 0
         ):
             raise ValueError("configured capacity limits are invalid")
 
@@ -223,5 +255,52 @@ class Config:
             ),
             origin_global_max_queue=_non_negative_int(
                 "MEGACACHE_ORIGIN_GLOBAL_MAX_QUEUE", 256
+            ),
+            events_file=_optional_path("MEGACACHE_EVENTS_FILE"),
+            event_state_file=os.getenv(
+                "MEGACACHE_EVENT_STATE_FILE",
+                "megacache-events-state.json",
+            ),
+            event_max_seen=_positive_int(
+                "MEGACACHE_EVENT_MAX_SEEN", 10_000
+            ),
+            event_max_replay_tokens=_positive_int(
+                "MEGACACHE_EVENT_MAX_REPLAY_TOKENS", 10_000
+            ),
+            event_max_dead_letters=_positive_int(
+                "MEGACACHE_EVENT_MAX_DEAD_LETTERS", 1_000
+            ),
+            event_max_dead_letter_bytes=_positive_int(
+                "MEGACACHE_EVENT_MAX_DEAD_LETTER_BYTES", 8_388_608
+            ),
+            event_max_streams=_positive_int(
+                "MEGACACHE_EVENT_MAX_STREAMS", 1_000
+            ),
+            event_max_state_bytes=_positive_int(
+                "MEGACACHE_EVENT_MAX_STATE_BYTES", 16_777_216
+            ),
+            event_max_payload_bytes=_positive_int(
+                "MEGACACHE_EVENT_MAX_PAYLOAD_BYTES", 1_048_576
+            ),
+            event_max_cursor_bytes=_positive_int(
+                "MEGACACHE_EVENT_MAX_CURSOR_BYTES", 4_096
+            ),
+            event_max_error_bytes=_positive_int(
+                "MEGACACHE_EVENT_MAX_ERROR_BYTES", 4_096
+            ),
+            event_graph_max_nodes=_positive_int(
+                "MEGACACHE_EVENT_GRAPH_MAX_NODES", 10_000
+            ),
+            event_graph_max_edges=_positive_int(
+                "MEGACACHE_EVENT_GRAPH_MAX_EDGES", 50_000
+            ),
+            event_graph_max_fanout=_positive_int(
+                "MEGACACHE_EVENT_GRAPH_MAX_FANOUT", 100
+            ),
+            event_graph_max_depth=_positive_int(
+                "MEGACACHE_EVENT_GRAPH_MAX_DEPTH", 16
+            ),
+            event_graph_max_invalidation_nodes=_positive_int(
+                "MEGACACHE_EVENT_GRAPH_MAX_INVALIDATION_NODES", 10_000
             ),
         )

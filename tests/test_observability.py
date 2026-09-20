@@ -38,10 +38,14 @@ class ObservabilityTests(unittest.TestCase):
         record.protocol = "http"
         record.operation = "GET /healthz"
         record.status = 200
+        record.event_source = "catalog"
+        record.event_outcome = "processed"
         document = json.loads(JsonFormatter().format(record))
         self.assertEqual("request", document["message"])
         self.assertEqual("http", document["protocol"])
         self.assertEqual(200, document["status"])
+        self.assertEqual("catalog", document["event_source"])
+        self.assertEqual("processed", document["event_outcome"])
 
 
 if __name__ == "__main__":

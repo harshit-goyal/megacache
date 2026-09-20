@@ -1,0 +1,46 @@
+{
+  "readers": [
+    {
+      "name": "catalog.product",
+      "minimum_version": 1,
+      "maximum_version": 2
+    }
+  ],
+  "namespaces": [
+    {
+      "name": "catalog",
+      "write_version": 2,
+      "reader_minimum": 1,
+      "reader_maximum": 2,
+      "migration_policy": "rolling"
+    }
+  ],
+  "rules": [
+    {
+      "name": "product-change",
+      "sources": ["postgres", "mysql", "mongo", "kafka", "catalog"],
+      "operations": ["insert", "update", "delete"],
+      "schema_names": ["catalog.product"],
+      "keys": ["product:{payload.id}"],
+      "tags": ["catalog", "tenant:{payload.tenant_id}"],
+      "namespace": "catalog"
+    }
+  ],
+  "dependencies": [
+    {
+      "dependency": "catalog:v1:product:42",
+      "dependent": "catalog-page:42"
+    },
+    {
+      "dependency": "catalog:v2:product:42",
+      "dependent": "catalog-page:42"
+    }
+  ],
+  "webhooks": [
+    {
+      "name": "catalog",
+      "secret_env": "MEGACACHE_CATALOG_WEBHOOK_SECRET",
+      "tolerance_seconds": 300
+    }
+  ]
+}

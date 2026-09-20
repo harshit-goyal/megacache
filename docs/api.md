@@ -3,11 +3,11 @@
 This document covers the HTTP protocol. For `redis-cli` and RESP2 clients, see
 the [RESP command reference](resp.md).
 
-All `/v1/*` endpoints require authentication when an API key or users file is
-configured. Legacy API keys use `Authorization: Bearer <key>`. Named users use
+All `/v1/*` endpoints except configured webhook routes require application
+authentication when an API key or users file is configured. Legacy API keys use `Authorization: Bearer <key>`. Named users use
 HTTP Basic authentication over TLS. Named-user permissions and key prefixes
-are enforced for every operation. Keys are URL-path components and should be
-percent encoded.
+are enforced for every operation. Webhook routes use their own HMAC
+credentials. Keys are URL-path components and should be percent encoded.
 
 ## Cache entries
 
@@ -118,6 +118,69 @@ no matched key is removed when any key cannot satisfy quorum.
 
 Returns `{"invalidated": 12}`.
 
+## Freshness events
+
+### `POST /v1/events`
+
+Submits one normalized event. The caller needs `invalidate` permission.
+
+```json
+{
+  "event_id": "catalog-1042",
+  "source": "postgres",
+  "stream": "catalog-slot",
+  "position": 1042,
+  "cursor": "0/16B6C50",
+  "operation": "update",
+  "schema_id": "catalog.product@2",
+  "payload": {"id": 42, "tenant_id": "acme"}
+}
+```
+
+The response reports `processed`, `duplicate`, `replayed`, or `dead_letter`
+and includes the durable checkpoint and invalidation counts. Capacity pressure
+returns `429 event_backpressure` without advancing the checkpoint. If no event
+file is configured, or the configured file has no rules, ingestion returns a
+clear `503` disabled/not-configured response.
+
+### `POST /v1/events/webhook/{source}`
+
+Webhook routes use their configured source secret rather than normal HTTP
+authentication. Required headers are:
+
+```text
+X-MegaCache-Timestamp: UNIX_SECONDS
+X-MegaCache-Delivery: UNIQUE_DELIVERY_ID
+X-MegaCache-Signature: sha256=HEX_HMAC
+```
+
+The HMAC-SHA256 input is `megacache-webhook-v2|` followed by four
+length-framed fields in order: source, timestamp header, delivery header, and
+the exact body. Each frame is the ASCII decimal byte length, `:`, then the
+unmodified bytes. Signatures use constant-time comparison. Timestamp tolerance
+and durable delivery claims prevent replay. Live claims are never evicted;
+claim-capacity pressure returns `429`. Authentication failures return a
+deliberately generic `401`.
+
+### `GET /v1/events/status`
+
+Administrator-only status containing checkpoints and native cursors, retained
+deduplication and replay counts, DLQ depth, rule/schema/namespace configuration,
+graph/state bounds, current state and DLQ bytes, event metrics, and an explicit
+`enabled` boolean. Checkpoint map keys are opaque v2 length-framed identifiers;
+each checkpoint value also contains its source and stream.
+
+### `POST /v1/events/retry`
+
+Administrator-only retry of due retryable dead letters:
+
+```json
+{"limit": 100}
+```
+
+See [Freshness events and CDC adapters](events.md) for the normalized envelope,
+state semantics, adapters, and configuration.
+
 ## Operations
 
 - `GET /healthz`: process liveness.
@@ -126,6 +189,7 @@ Returns `{"invalidated": 12}`.
 - `GET /metrics`: Prometheus text exposition.
 - `GET /v1/stats`: JSON metric snapshot.
 - `GET /v1/origins`: administrator-only origin health and breaker state.
+- `GET /v1/events/status`: administrator-only freshness ingestion status.
 
 Errors are JSON objects with a stable `error` identifier and, for invalid
 requests, a human-readable `message`.

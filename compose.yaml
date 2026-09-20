@@ -14,4 +14,10 @@ services:
       MEGACACHE_CLUSTER_NODES: "node-1"
       MEGACACHE_REPLICA_COUNT: "1"
       MEGACACHE_CONSISTENCY: "majority"
+      MEGACACHE_EVENT_STATE_FILE: "/var/lib/megacache/events-state.json"
+    volumes:
+      - megacache-events:/var/lib/megacache
     restart: unless-stopped
+
+volumes:
+  megacache-events:

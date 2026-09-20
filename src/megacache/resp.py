@@ -10,6 +10,7 @@ from typing import Any, Iterable, List, Optional, Sequence, Tuple
 from .auth import AuthManager, Principal
 from .config import Config
 from .engine import CacheResult
+from .events import EventBackpressure, EventError, EventIngestionDisabled
 from .origin import OriginError, OriginOverloaded
 from .storage import StorageBackend
 from .transport import TLSRequestMixin
@@ -137,6 +138,9 @@ class MegaCacheRespHandler(socketserver.StreamRequestHandler):
             "MC.STATUS",
             "MC.FETCH",
             "MC.ORIGINS",
+            "MC.EVENT",
+            "MC.EVENT.STATUS",
+            "MC.EVENT.RETRY",
         }
         return command if command in supported else "UNKNOWN"
 
@@ -220,6 +224,9 @@ class MegaCacheRespHandler(socketserver.StreamRequestHandler):
             "MC.STATUS": self._mc_status,
             "MC.FETCH": self._mc_fetch,
             "MC.ORIGINS": self._mc_origins,
+            "MC.EVENT": self._mc_event,
+            "MC.EVENT.STATUS": self._mc_event_status,
+            "MC.EVENT.RETRY": self._mc_event_retry,
         }
         if command == "QUIT":
             self._require_arity(args, 1)
@@ -376,7 +383,7 @@ class MegaCacheRespHandler(socketserver.StreamRequestHandler):
         lines = [
             "# Server",
             "redis_version:7.2.0",
-            "megacache_version:0.6.0",
+            "megacache_version:0.7.0",
             "redis_mode:standalone",
             "# Keyspace",
             "db0:keys={}".format(self.server.engine.size()),
@@ -414,7 +421,7 @@ class MegaCacheRespHandler(socketserver.StreamRequestHandler):
             b"server",
             b"megacache",
             b"version",
-            b"0.6.0",
+            b"0.7.0",
             b"proto",
             2,
             b"mode",
@@ -599,6 +606,68 @@ class MegaCacheRespHandler(socketserver.StreamRequestHandler):
         self._authorize("admin")
         origins = getattr(self.server.engine, "origins", None)
         value = {} if origins is None else origins()
+        return json.dumps(value, separators=(",", ":")).encode("utf-8")
+
+    def _mc_event(self, args: Sequence[bytes]) -> bytes:
+        self._require_arity(args, 2)
+        self._authorize("invalidate")
+        ingest = getattr(self.server.engine, "ingest_event", None)
+        if ingest is None:
+            raise RespCommandError("event ingestion is not configured")
+        try:
+            value = json.loads(args[1].decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RespCommandError("event must be valid JSON") from exc
+        if not isinstance(value, dict):
+            raise RespCommandError("event must be a JSON object")
+        try:
+            result = ingest(value)
+        except EventIngestionDisabled as exc:
+            raise RespCommandError("events disabled: {}".format(exc)) from exc
+        except EventBackpressure as exc:
+            raise RespCommandError("BUSY {}".format(exc)) from exc
+        except OSError as exc:
+            raise RespCommandError("event state is unavailable") from exc
+        except EventError as exc:
+            raise RespCommandError(str(exc)) from exc
+        return json.dumps(result, separators=(",", ":")).encode("utf-8")
+
+    def _mc_event_status(self, args: Sequence[bytes]) -> bytes:
+        self._require_arity(args, 1)
+        self._authorize("admin")
+        status = getattr(self.server.engine, "event_status", None)
+        if status is None:
+            raise RespCommandError("event ingestion is not configured")
+        try:
+            value = status()
+        except OSError as exc:
+            raise RespCommandError("event state is unavailable") from exc
+        return json.dumps(value, separators=(",", ":")).encode("utf-8")
+
+    def _mc_event_retry(self, args: Sequence[bytes]) -> bytes:
+        if len(args) not in (1, 2):
+            raise RespCommandError(
+                "wrong number of arguments for 'mc.event.retry' command"
+            )
+        self._authorize("admin")
+        retry = getattr(self.server.engine, "retry_events", None)
+        if retry is None:
+            raise RespCommandError("event ingestion is not configured")
+        limit = (
+            100
+            if len(args) == 1
+            else self._positive_arg(args[1], "retry limit")
+        )
+        try:
+            value = retry(limit)
+        except EventIngestionDisabled as exc:
+            raise RespCommandError("events disabled: {}".format(exc)) from exc
+        except EventBackpressure as exc:
+            raise RespCommandError("BUSY {}".format(exc)) from exc
+        except OSError as exc:
+            raise RespCommandError("event state is unavailable") from exc
+        except EventError as exc:
+            raise RespCommandError(str(exc)) from exc
         return json.dumps(value, separators=(",", ":")).encode("utf-8")
 
     def _authorize(self, permission: str, keys: Iterable[str] = ()) -> None:

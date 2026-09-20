@@ -101,7 +101,7 @@ stale-while-revalidate, stale-if-error boundaries, negative responses, retry
 budgets and backoff, concurrency and queue shedding, breaker transitions,
 timeouts, response limits, redirect handling, SSRF policy, and shutdown.
 
-## Phase 4: freshness automation
+## Phase 4: freshness automation — complete in 0.7
 
 Deliverables:
 
@@ -114,11 +114,28 @@ Deliverables:
 - Versioned namespaces and rolling-deployment migration policies
 - Replay checkpoints, dead-letter handling, and idempotency
 
+Version 0.7 implements a normalized event envelope, declarative key/tag
+transforms, bounded cycle-safe dependency invalidation, compatible schema
+readers and explicit migrations, rolling versioned namespaces, durable atomic
+checkpoints, bounded deduplication, and a retryable bounded dead-letter queue.
+Authenticated HTTP/RESP ingestion and HMAC-SHA256 webhooks share the same core.
+
+Kafka integration is an implementable `RecordConsumer` contract and record
+adapter. PostgreSQL logical replication, MySQL binlog, and MongoDB change-stream
+integrations are externally-fed adapter interfaces. MegaCache intentionally
+does not claim native wire clients, consumer-group coordination, replication
+slot management, or database-driver behavior because version 0.7 retains zero
+runtime dependencies.
+
 Acceptance criteria:
 
 - Connector restart resumes without silently skipping committed changes.
 - Duplicate events do not cause incorrect state.
 - Dependency invalidation is bounded, observable, and cycle-safe.
+
+Tests cover restart resume, duplicates, replay and out-of-order input, webhook
+authentication/replay, schema compatibility and migrations, dependency graph
+bounds, connector record mapping, and dead-letter retry metadata.
 
 ## Phase 5: developer platform
 

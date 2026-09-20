@@ -13,6 +13,12 @@ from .auth import AuthManager, Principal
 from .cluster import QuorumError
 from .config import Config
 from .engine import CacheResult
+from .events import (
+    EventBackpressure,
+    EventError,
+    EventIngestionDisabled,
+    WebhookAuthError,
+)
 from .origin import (
     OriginOverloaded,
     OriginPolicyError,
@@ -82,6 +88,21 @@ class MegaCacheHandler(BaseHTTPRequestHandler):
             origins = getattr(self.server.engine, "origins", None)
             self._json(200, {} if origins is None else origins())
             return
+        if path == "/v1/events/status":
+            if not self._authorized("admin"):
+                return
+            status = getattr(self.server.engine, "event_status", None)
+            if status is None:
+                self._json(
+                    503,
+                    {
+                        "error": "events_not_configured",
+                        "message": "event ingestion is not configured",
+                    },
+                )
+            else:
+                self._json(200, status())
+            return
         key = self._key_from(path, "/v1/cache/")
         if key is not None:
             if not self._authorized("read", (key,)):
@@ -134,6 +155,131 @@ class MegaCacheHandler(BaseHTTPRequestHandler):
         self._request_started = time.perf_counter()
         self.close_connection = True
         path = urlsplit(self.path).path
+        if path == "/v1/events":
+            if not self._authorized("invalidate"):
+                return
+            ingest = getattr(self.server.engine, "ingest_event", None)
+            if ingest is None:
+                self._json(
+                    503,
+                    {
+                        "error": "events_not_configured",
+                        "message": "event ingestion is not configured",
+                    },
+                )
+                return
+            try:
+                self._json(200, ingest(self._read_json()))
+            except EventIngestionDisabled as exc:
+                self._json(
+                    503,
+                    {"error": "events_disabled", "message": str(exc)},
+                )
+            except EventBackpressure as exc:
+                self._json(
+                    429,
+                    {"error": "event_backpressure", "message": str(exc)},
+                )
+            except OSError:
+                self._json(
+                    503,
+                    {
+                        "error": "event_state_unavailable",
+                        "message": "event state could not be persisted",
+                    },
+                )
+            except (EventError, ValueError, TypeError) as exc:
+                self._json(
+                    400, {"error": "invalid_event", "message": str(exc)}
+                )
+            return
+        if path == "/v1/events/retry":
+            if not self._authorized("admin"):
+                return
+            retry = getattr(self.server.engine, "retry_events", None)
+            if retry is None:
+                self._json(
+                    503,
+                    {
+                        "error": "events_not_configured",
+                        "message": "event ingestion is not configured",
+                    },
+                )
+                return
+            try:
+                body = self._read_json()
+                limit = body.get("limit", 100)
+                if isinstance(limit, bool) or not isinstance(limit, int):
+                    raise ValueError("limit must be an integer")
+                self._json(200, retry(limit))
+            except EventIngestionDisabled as exc:
+                self._json(
+                    503,
+                    {"error": "events_disabled", "message": str(exc)},
+                )
+            except EventBackpressure as exc:
+                self._json(
+                    429,
+                    {"error": "event_backpressure", "message": str(exc)},
+                )
+            except OSError:
+                self._json(
+                    503,
+                    {
+                        "error": "event_state_unavailable",
+                        "message": "event state could not be persisted",
+                    },
+                )
+            except (EventError, ValueError) as exc:
+                self._json(
+                    400, {"error": "invalid_request", "message": str(exc)}
+                )
+            return
+        webhook = self._key_from(path, "/v1/events/webhook/")
+        if webhook is not None:
+            ingest_webhook = getattr(
+                self.server.engine, "ingest_webhook", None
+            )
+            if ingest_webhook is None:
+                self._json(
+                    503,
+                    {
+                        "error": "events_not_configured",
+                        "message": "event ingestion is not configured",
+                    },
+                )
+                return
+            try:
+                body = self._read_body()
+                self._json(
+                    200,
+                    ingest_webhook(webhook, self.headers, body),
+                )
+            except EventIngestionDisabled as exc:
+                self._json(
+                    503,
+                    {"error": "events_disabled", "message": str(exc)},
+                )
+            except EventBackpressure as exc:
+                self._json(
+                    429,
+                    {"error": "event_backpressure", "message": str(exc)},
+                )
+            except WebhookAuthError:
+                self._json(401, {"error": "invalid_webhook"})
+            except OSError:
+                self._json(
+                    503,
+                    {
+                        "error": "event_state_unavailable",
+                        "message": "event state could not be persisted",
+                    },
+                )
+            except (EventError, ValueError, TypeError) as exc:
+                self._json(
+                    400, {"error": "invalid_event", "message": str(exc)}
+                )
+            return
         key = self._key_from(path, "/v1/fetch/")
         if key is not None:
             if not self._authorized("read", (key,)):
@@ -276,6 +422,16 @@ class MegaCacheHandler(BaseHTTPRequestHandler):
         return None
 
     def _read_json(self) -> Dict[str, Any]:
+        raw = self._read_body()
+        try:
+            value = json.loads(raw)
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise ValueError("body must be valid JSON") from exc
+        if not isinstance(value, dict):
+            raise ValueError("body must be a JSON object")
+        return value
+
+    def _read_body(self) -> bytes:
         raw_length = self.headers.get("Content-Length")
         if raw_length is None:
             raise ValueError("Content-Length is required")
@@ -285,13 +441,7 @@ class MegaCacheHandler(BaseHTTPRequestHandler):
             raise ValueError("Content-Length must be an integer") from exc
         if length < 0 or length > self.server.config.max_body_bytes:
             raise ValueError("request body exceeds configured limit")
-        try:
-            value = json.loads(self.rfile.read(length))
-        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            raise ValueError("body must be valid JSON") from exc
-        if not isinstance(value, dict):
-            raise ValueError("body must be a JSON object")
-        return value
+        return self.rfile.read(length)
 
     @staticmethod
     def _key_from(path: str, prefix: str) -> Optional[str]:
@@ -385,6 +535,9 @@ class MegaCacheHandler(BaseHTTPRequestHandler):
             "/metrics",
             "/v1/stats",
             "/v1/origins",
+            "/v1/events",
+            "/v1/events/status",
+            "/v1/events/retry",
         ):
             return "{} {}".format(self.command, path)
         for prefix, route in (
@@ -396,4 +549,6 @@ class MegaCacheHandler(BaseHTTPRequestHandler):
                 return "{} {}".format(self.command, route)
         if path == "/v1/invalidate":
             return "{} /v1/invalidate".format(self.command)
+        if path.startswith("/v1/events/webhook/"):
+            return "{} /v1/events/webhook/{{source}}".format(self.command)
         return "{} unknown".format(self.command)

@@ -90,11 +90,45 @@ allowlists narrow, prefer TLS, use dedicated origin credentials with read-only
 scope, and restrict configuration-file permissions. Adding broad private
 network CIDRs materially expands what a compromised write-capable MegaCache
 client can reach. Origin definitions are loaded at startup, so restart after
-rotation. MegaCache 0.6 intentionally has no arbitrary URL mode.
+rotation. MegaCache 0.7 intentionally has no arbitrary URL mode.
+
+## Event and webhook security
+
+Direct HTTP/RESP event ingestion requires `invalidate` permission. Treat event
+producers as authoritative: transformation rules can invalidate every key or
+tag they are configured to derive. Keep rule filters and namespace ranges
+narrow, and protect `MEGACACHE_EVENTS_FILE` from untrusted modification.
+
+Webhook endpoints authenticate independently with HMAC-SHA256 over
+length-framed source, timestamp, delivery ID, and exact request-body bytes.
+This prevents field-boundary ambiguity and binds the route/source and delivery
+identity to the signature. Secrets must contain at least 16 bytes; use
+high-entropy values, prefer `secret_env` over inline JSON, transmit webhooks
+over TLS, and rotate by restarting MegaCache with updated configuration.
+Timestamp tolerance and durable one-use delivery identifiers limit replay;
+live claims are never evicted to admit new deliveries.
+MegaCache returns a generic authentication error and never logs signatures,
+delivery identifiers, event bodies, rendered keys, or secrets.
+The normalized event source is bound to the configured webhook name, so one
+webhook credential cannot select another source's transformation rules.
+
+Protect `MEGACACHE_EVENT_STATE_FILE` as sensitive operational data. It contains
+source cursors, event IDs, delivery claims, and failed event payloads in the
+dead-letter queue. The file is created mode `0600`, but its parent directory,
+backups, volume permissions, retention, and secure deletion remain operator
+responsibilities. Exactly one process may own a state file; MegaCache enforces
+this with an advisory sibling-file lock on macOS/Linux. State, stream, payload,
+cursor, error, replay, and dead-letter count/byte limits are security
+boundaries. Capacity exhaustion rejects work before checkpoint advancement.
+
+Kafka and database adapters do not open network connections and do not process
+credentials. Applications supplying native clients remain responsible for
+TLS, broker/database authentication, least-privilege replication accounts,
+consumer-group or slot ownership, network allowlists, and driver updates.
 
 ## Cluster security boundary
 
-Version 0.6 provides an in-process cluster coordinator and no node-to-node
+Version 0.7 provides an in-process cluster coordinator and no node-to-node
 network listener. Logical node IDs in `MEGACACHE_CLUSTER_NODES` are local
 configuration, not authenticated identities. Do not expose or build an
 unauthenticated RPC shim around `ClusterStorage`.

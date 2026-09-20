@@ -17,7 +17,7 @@ behind appropriate network controls; use a TCP TLS proxy for RESP when traffic
 crosses a trusted boundary. The process runs as an unprivileged user in the
 supplied container, logs requests to standard output, and shuts down cleanly.
 
-Version 0.6's cluster is in-process. A comma-separated
+Version 0.7's cluster is in-process. A comma-separated
 `MEGACACHE_CLUSTER_NODES` value creates independent logical storage nodes
 managed by one coordinator. This is useful for embedded operation, exercising
 replication behavior, and validating failure procedures, but it is not a
@@ -40,6 +40,54 @@ Plan process memory for their sum plus transfer buffers.
 Origin singleflight is cluster-wide only inside this one coordinator object.
 Running the same origin file in multiple processes creates independent
 singleflight tables, retry budgets, breakers, and concurrency budgets.
+
+## Freshness event configuration
+
+Copy and edit `events.example.json`, then place event state on durable local
+storage:
+
+```bash
+export MEGACACHE_EVENTS_FILE="$PWD/events.json"
+export MEGACACHE_EVENT_STATE_FILE="/var/lib/megacache/events-state.json"
+export MEGACACHE_CATALOG_WEBHOOK_SECRET='replace-with-a-long-random-secret'
+mc serve
+```
+
+Only one process may own a state file. MegaCache holds a non-blocking advisory
+lock on the sibling `.lock` file for the store lifetime; a duplicate owner
+fails startup. The state is atomically replaced and fsynced after successful
+invalidation or durable dead-letter insertion. Back it up with other
+operational metadata, protect both files as mode `0600`, and alert on write or
+capacity failures. Do not use an eventually consistent object-store mount.
+
+On connector restart, read the relevant source/stream cursor from
+`mc events-status` and reconnect the external Kafka or database driver there.
+For Kafka, use `KafkaRecordAdapter` with an application-provided
+`RecordConsumer`. PostgreSQL, MySQL, and MongoDB adapters likewise accept
+records from native drivers selected and operated by the application.
+MegaCache does not manage consumer groups, logical slots, binlog retention,
+resume-token expiry, source credentials, or network reconnects. PostgreSQL
+drivers must feed each complete transaction/change batch in strict
+`(LSN, ordinal)` order and provide a stable zero-based ordinal for every
+change, including single-change transactions.
+
+Use unique source/stream pairs and monotonically increasing positions. MySQL
+integrations must assign a monotonic sequence across file rotation; MongoDB
+integrations must retain the native resume token while providing a monotonic
+sequence. Inspect and retry the bounded DLQ with:
+
+```bash
+mc events-status
+mc events-retry --limit 100
+```
+
+DLQ count/byte limits and total state capacity apply backpressure before a
+failed event's checkpoint advances; unresolved failures are never evicted.
+Lowering limits below existing durable usage causes startup to fail rather than
+silently truncating state. Configure stream, payload, cursor, error, DLQ-byte,
+and total-state budgets for the expected workload. Leaving
+`MEGACACHE_EVENTS_FILE` unset disables event APIs; a file with zero rules is
+reported as `enabled: false` and rejects ingestion without checkpointing.
 
 ## Origin configuration
 
@@ -116,6 +164,8 @@ Scrape `/metrics` and alert on:
 - `megacache_origin_breaker_state`, concurrency, and queue depth;
 - `origin_load_shed_total`, retry exhaustion, stale-if-error, negative hits,
   and refresh errors from `mc info` or `/v1/stats`.
+- `megacache_events_total` by outcome, `event_dead_letter_depth`,
+  `event_graph_rejected_total`, checkpoint age, and source cursor lag.
 
 Counters reset at process restart. `entries`, `tags`, and `active_leases` are
 gauges; other exported values are cumulative counters.
@@ -162,13 +212,13 @@ Snapshot sessions enforce
 `MEGACACHE_SNAPSHOT_CHUNK_BYTES`, and
 `MEGACACHE_SNAPSHOT_MAX_IN_FLIGHT`.
 
-There is no native node RPC in 0.6. Real packet loss, asymmetric partitions,
+There is no native node RPC in 0.7. Real packet loss, asymmetric partitions,
 cross-host clocks, and process split brain are outside implemented behavior.
 
 Treat MegaCache as optional infrastructure. Clients should enforce short
 timeouts and fall back to the authoritative origin when it is unavailable.
 Rate-limit that fallback to avoid transferring a cache outage to the origin.
 
-Because version 0.6 is in-memory, rolling restarts begin cold. Warm critical
+Because version 0.7 cache entries are in-memory, rolling restarts begin cold. Warm critical
 keys gradually with `mc fetch`; the same admission and origin protection
 policies apply to warming.
